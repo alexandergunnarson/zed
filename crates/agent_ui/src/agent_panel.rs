@@ -4237,6 +4237,16 @@ impl AgentPanel {
         }
         key_context
     }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .w(px(280.))
+            .h_full()
+            .border_r_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().panel_background)
+            .child(self.acp_history.clone())
+    }
 }
 
 impl Render for AgentPanel {
@@ -4291,14 +4301,16 @@ impl Render for AgentPanel {
                     self.emit_configuration_error_telemetry_if_needed(configuration_error.as_ref());
                 }
 
-                match &self.active_view {
-                    ActiveView::Uninitialized => parent,
-                    ActiveView::AgentThread { server_view, .. } => parent
+                let mut right_pane = v_flex().size_full();
+
+                right_pane = match &self.active_view {
+                    ActiveView::Uninitialized => right_pane,
+                    ActiveView::AgentThread { server_view, .. } => right_pane
                         .child(server_view.clone())
                         .child(self.render_drag_target(cx)),
                     ActiveView::History { kind } => match kind {
-                        HistoryKind::AgentThreads => parent.child(self.acp_history.clone()),
-                        HistoryKind::TextThreads => parent.child(self.text_thread_history.clone()),
+                        HistoryKind::AgentThreads => right_pane.child(div().size_full().flex().justify_center().items_center().child("Select a thread on the left")),
+                        HistoryKind::TextThreads => right_pane.child(self.text_thread_history.clone()),
                     },
                     ActiveView::TextThread {
                         text_thread_editor,
@@ -4309,7 +4321,7 @@ impl Render for AgentPanel {
                         let configuration_error =
                             model_registry.configuration_error(model_registry.default_model(), cx);
 
-                        parent
+                        right_pane
                             .map(|this| {
                                 if !self.should_render_onboarding(cx)
                                     && let Some(err) = configuration_error.as_ref()
@@ -4331,8 +4343,15 @@ impl Render for AgentPanel {
                                 cx,
                             ))
                     }
-                    ActiveView::Configuration => parent.children(self.configuration.clone()),
-                }
+                    ActiveView::Configuration => right_pane.children(self.configuration.clone()),
+                };
+
+                parent.child(
+                    h_flex()
+                        .size_full()
+                        .child(self.render_sidebar(cx))
+                        .child(right_pane)
+                )
             })
             .children(self.render_trial_end_upsell(window, cx));
 
