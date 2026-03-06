@@ -920,6 +920,7 @@ zed_actions = { codegen-units = 1 }
 
 [profile.release]
 debug = "limited"
+strip = true
 lto = "thin"
 codegen-units = 1
 
