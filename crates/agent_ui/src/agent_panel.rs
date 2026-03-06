@@ -3646,7 +3646,7 @@ impl AgentPanel {
             selected_agent.into_any_element()
         };
 
-        let show_history_menu = self.history_kind_for_selected_agent(cx).is_some();
+        let show_history_menu = false;
         let has_v2_flag = cx.has_flag::<AgentV2FeatureFlag>();
         let is_empty_state = !self.active_thread_has_messages(cx);
 
@@ -4245,6 +4245,19 @@ impl AgentPanel {
             .border_r_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().panel_background)
+            .child(
+                h_flex()
+                    .w_full()
+                    .p_2()
+                    .child(
+                        Button::new("new_thread", "New Chat")
+                            .full_width()
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_agent_thread(AgentType::NativeAgent, window, cx);
+                            }))
+                    )
+            )
             .child(self.acp_history.clone())
     }
 }
@@ -4288,7 +4301,6 @@ impl Render for AgentPanel {
                     thread_view.update(cx, |thread_view, cx| thread_view.reauthenticate(window, cx))
                 }
             }))
-            .child(self.render_toolbar(window, cx))
             .children(self.render_worktree_creation_status(cx))
             .children(self.render_workspace_trust_message(cx))
             .children(self.render_onboarding(window, cx))
@@ -4301,7 +4313,7 @@ impl Render for AgentPanel {
                     self.emit_configuration_error_telemetry_if_needed(configuration_error.as_ref());
                 }
 
-                let mut right_pane = v_flex().size_full();
+                let mut right_pane = v_flex().size_full().child(self.render_toolbar(window, cx));
 
                 right_pane = match &self.active_view {
                     ActiveView::Uninitialized => right_pane,

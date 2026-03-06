@@ -229,6 +229,7 @@ pub struct ThreadView {
     /// Tracks which tool calls have their content/output expanded.
     /// Used for showing/hiding tool call results, terminal output, etc.
     pub expanded_tool_calls: HashSet<agent_client_protocol::ToolCallId>,
+    pub collapsed_tool_calls: HashSet<agent_client_protocol::ToolCallId>,
     pub expanded_tool_call_raw_inputs: HashSet<agent_client_protocol::ToolCallId>,
     pub expanded_thinking_blocks: HashSet<(usize, usize)>,
     pub subagent_scroll_handles: RefCell<HashMap<agent_client_protocol::SessionId, ScrollHandle>>,
@@ -288,6 +289,30 @@ pub struct TurnFields {
 }
 
 impl ThreadView {
+    fn toggle_tool_call(&mut self, id: &agent_client_protocol::ToolCallId, is_completed: bool) {
+        if is_completed {
+            if self.expanded_tool_calls.contains(id) {
+                self.expanded_tool_calls.remove(id);
+            } else {
+                self.expanded_tool_calls.insert(id.clone());
+            }
+        } else {
+            if self.collapsed_tool_calls.contains(id) {
+                self.collapsed_tool_calls.remove(id);
+            } else {
+                self.collapsed_tool_calls.insert(id.clone());
+            }
+        }
+    }
+
+    fn is_tool_call_open(&self, id: &agent_client_protocol::ToolCallId, is_completed: bool) -> bool {
+        if is_completed {
+            self.expanded_tool_calls.contains(id)
+        } else {
+            !self.collapsed_tool_calls.contains(id)
+        }
+    }
+
     pub(crate) fn new(
         parent_id: Option<acp::SessionId>,
         thread: Entity<AcpThread>,
@@ -460,6 +485,7 @@ impl ThreadView {
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
             expanded_tool_calls: HashSet::default(),
+            collapsed_tool_calls: HashSet::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
             expanded_thinking_blocks: HashSet::default(),
             subagent_scroll_handles: RefCell::new(HashMap::default()),
@@ -648,15 +674,11 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         match &event.view_event {
-            ViewEvent::NewDiff(tool_call_id) => {
-                if AgentSettings::get_global(cx).expand_edit_card {
-                    self.expanded_tool_calls.insert(tool_call_id.clone());
-                }
+            ViewEvent::NewDiff(_) => {
+                
             }
-            ViewEvent::NewTerminal(tool_call_id) => {
-                if AgentSettings::get_global(cx).expand_terminal_card {
-                    self.expanded_tool_calls.insert(tool_call_id.clone());
-                }
+            ViewEvent::NewTerminal(_) => {
+                
             }
             ViewEvent::TerminalMovedToBackground(tool_call_id) => {
                 self.expanded_tool_calls.remove(tool_call_id);
@@ -4953,7 +4975,8 @@ impl ThreadView {
         let command_element =
             self.render_collapsible_command(header_group.clone(), false, command_content, cx);
 
-        let is_expanded = self.expanded_tool_calls.contains(&tool_call.id);
+        let is_completed = matches!(tool_call.status, ToolCallStatus::Completed);
+        let is_expanded = self.is_tool_call_open(&tool_call.id, is_completed);
 
         let header = h_flex()
             .id(header_id)
@@ -4991,11 +5014,7 @@ impl ThreadView {
                 .on_click(cx.listener({
                     let id = tool_call.id.clone();
                     move |this, _event, _window, cx| {
-                        if is_expanded {
-                            this.expanded_tool_calls.remove(&id);
-                        } else {
-                            this.expanded_tool_calls.insert(id.clone());
-                        }
+                        this.toggle_tool_call(&id, is_completed);
                         cx.notify();
                     }
                 })),
@@ -5286,7 +5305,8 @@ impl ThreadView {
 
         let has_image_content = tool_call.content.iter().any(|c| c.image().is_some());
         let is_collapsible = !tool_call.content.is_empty() && !needs_confirmation;
-        let mut is_open = self.expanded_tool_calls.contains(&tool_call.id);
+        let is_completed = matches!(tool_call.status, ToolCallStatus::Completed);
+        let mut is_open = self.is_tool_call_open(&tool_call.id, is_completed);
 
         is_open |= needs_confirmation;
 
@@ -5557,13 +5577,7 @@ impl ThreadView {
                                                                   _,
                                                                   _,
                                                                   cx: &mut Context<Self>| {
-                                                                if is_open {
-                                                                    this.expanded_tool_calls
-                                                                        .remove(&id);
-                                                                } else {
-                                                                    this.expanded_tool_calls
-                                                                        .insert(id.clone());
-                                                                }
+                                                                this.toggle_tool_call(&id, is_completed);
                                                                 cx.notify();
                                                             }
                                                         })),
@@ -6441,7 +6455,7 @@ impl ThreadView {
                         .icon_color(Color::Muted)
                         .on_click(cx.listener({
                             move |this: &mut Self, _, _, cx: &mut Context<Self>| {
-                                this.expanded_tool_calls.remove(&tool_call_id);
+                                this.expanded_tool_calls.remove(&tool_call_id); this.collapsed_tool_calls.insert(tool_call_id.clone());
                                 cx.notify();
                             }
                         })),
@@ -6583,7 +6597,8 @@ impl ThreadView {
             })
             .is_some();
 
-        let is_expanded = self.expanded_tool_calls.contains(&tool_call.id);
+        let is_completed = matches!(tool_call.status, ToolCallStatus::Completed);
+        let is_expanded = self.is_tool_call_open(&tool_call.id, is_completed);
         let files_changed = changed_buffers.len();
         let diff_stats = DiffStats::all_files(&changed_buffers, cx);
 
@@ -6765,14 +6780,8 @@ impl ThreadView {
                                     .on_click(cx.listener({
                                         let tool_call_id = tool_call.id.clone();
                                         move |this, _, _, cx| {
-                                            if this.expanded_tool_calls.contains(&tool_call_id) {
-                                                this.expanded_tool_calls.remove(&tool_call_id);
-                                            } else {
-                                                this.expanded_tool_calls
-                                                    .insert(tool_call_id.clone());
-                                            }
-                                            let expanded =
-                                                this.expanded_tool_calls.contains(&tool_call_id);
+                                            this.toggle_tool_call(&tool_call_id, is_completed);
+                                            let expanded = this.is_tool_call_open(&tool_call_id, is_completed);
                                             telemetry::event!("Subagent Toggled", expanded);
                                             cx.notify();
                                         }

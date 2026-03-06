@@ -1512,6 +1512,12 @@ impl AgentSessionList for NativeAgentSessionList {
         Task::ready(Ok(AgentSessionListResponse::new(sessions)))
     }
 
+    fn search_sessions(&self, query: String, cx: &mut App) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
+        let store = self.thread_store.clone();
+        store.update(cx, |store, cx| store.search_threads(query, cx))
+    }
+
+
     fn supports_delete(&self) -> bool {
         true
     }

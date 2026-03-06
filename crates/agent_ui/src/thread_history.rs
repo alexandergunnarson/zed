@@ -53,6 +53,7 @@ enum ListItemType {
     SearchResult {
         entry: AgentSessionInfo,
         positions: Vec<usize>,
+        snippet: Option<String>,
     },
 }
 
@@ -411,42 +412,70 @@ impl ThreadHistory {
         })
     }
 
-    fn filter_search_results(
+fn filter_search_results(
         &self,
         entries: Vec<AgentSessionInfo>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> Task<Vec<ListItemType>> {
         let query = self.search_query.clone();
-        cx.background_spawn({
-            let executor = cx.background_executor().clone();
-            async move {
-                let mut candidates = Vec::with_capacity(entries.len());
+        let content_matches_task = if let Some(list) = &self.session_list {
+            Some(list.search_sessions(query.to_string(), cx))
+        } else {
+            None
+        };
 
-                for (idx, entry) in entries.iter().enumerate() {
-                    candidates.push(StringMatchCandidate::new(idx, thread_title(entry)));
-                }
+        let executor = cx.background_executor().clone();
+        cx.background_spawn(async move {
+            let mut candidates = Vec::with_capacity(entries.len());
 
-                const MAX_MATCHES: usize = 100;
-
-                let matches = fuzzy::match_strings(
-                    &candidates,
-                    &query,
-                    false,
-                    true,
-                    MAX_MATCHES,
-                    &Default::default(),
-                    executor,
-                )
-                .await;
-
-                matches
-                    .into_iter()
-                    .map(|search_match| ListItemType::SearchResult {
-                        entry: entries[search_match.candidate_id].clone(),
-                        positions: search_match.positions,
-                    })
-                    .collect()
+            for (idx, entry) in entries.iter().enumerate() {
+                candidates.push(StringMatchCandidate::new(idx, thread_title(entry)));
             }
+
+            const MAX_MATCHES: usize = 100;
+
+            let matches = fuzzy::match_strings(
+                &candidates,
+                &query,
+                false,
+                true,
+                MAX_MATCHES,
+                &Default::default(),
+                executor,
+            )
+            .await;
+
+            let mut title_matched_ids = std::collections::HashSet::new();
+            let mut result: Vec<ListItemType> = matches
+                .into_iter()
+                .map(|search_match| {
+                    let entry = entries[search_match.candidate_id].clone();
+                    title_matched_ids.insert(entry.session_id.clone());
+                    ListItemType::SearchResult {
+                        entry,
+                        positions: search_match.positions,
+                        snippet: None,
+                    }
+                })
+                .collect();
+
+            if let Some(content_matches_task) = content_matches_task {
+                if let Ok(content_matches) = content_matches_task.await {
+                    for match_res in content_matches {
+                        if !title_matched_ids.contains(&match_res.session_id) {
+                            if let Some(entry) = entries.iter().find(|e| e.session_id == match_res.session_id) {
+                                result.push(ListItemType::SearchResult {
+                                    entry: entry.clone(),
+                                    positions: Vec::new(),
+                                    snippet: match_res.snippet,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            result
         })
     }
 
@@ -579,15 +608,7 @@ impl ThreadHistory {
         cx.notify();
     }
 
-    fn prompt_delete_history(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.confirming_delete_history = true;
-        cx.notify();
-    }
 
-    fn cancel_delete_history(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.confirming_delete_history = false;
-        cx.notify();
-    }
 
     fn render_list_items(
         &mut self,
@@ -609,11 +630,11 @@ impl ThreadHistory {
             ListItemType::Entry { entry, format } => self
                 .render_history_entry(entry, *format, ix, Vec::default(), cx)
                 .into_any(),
-            ListItemType::SearchResult { entry, positions } => self.render_history_entry(
+            ListItemType::SearchResult { entry, positions, snippet } => self.render_history_entry_search(
                 entry,
-                EntryTimeFormat::DateAndTime,
                 ix,
                 positions.clone(),
+                snippet,
                 cx,
             ),
             ListItemType::BucketSeparator(bucket) => div()
@@ -629,7 +650,57 @@ impl ThreadHistory {
         }
     }
 
-    fn render_history_entry(
+    fn render_history_entry_search(
+        &self,
+        entry: &AgentSessionInfo,
+        ix: usize,
+        highlight_positions: Vec<usize>,
+        snippet: &Option<String>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let selected = ix == self.selected_index;
+        let hovered = Some(ix) == self.hovered_index;
+        let title = thread_title(entry).clone();
+        
+        v_flex()
+            .w_full()
+            .child(
+                ListItem::new(ix)
+                    .rounded()
+                    .toggle_state(selected)
+                    .spacing(ListItemSpacing::Sparse)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .child(
+                                        HighlightedLabel::new(title.clone(), highlight_positions)
+                                            .size(LabelSize::Small)
+                                            .truncate(),
+                                    )
+                            )
+                            .when_some(snippet.clone(), |this, snippet| {
+                                this.child(
+                                    Label::new(snippet)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                )
+                            })
+                    )
+                    .on_hover(cx.listener(move |this, is_hovered, _window, cx| {
+                        if *is_hovered {
+                            this.hovered_index = Some(ix);
+                        } else if this.hovered_index == Some(ix) {
+                            this.hovered_index = None;
+                        }
+                        cx.notify();
+                    }))
+            ).into_any_element()
+    }
+fn render_history_entry(
         &self,
         entry: &AgentSessionInfo,
         format: EntryTimeFormat,
@@ -794,68 +865,7 @@ impl Render for ThreadHistory {
                     .vertical_scrollbar_for(&self.scroll_handle, window, cx)
                 }
             })
-            .when(!has_no_history && self.supports_delete(), |this| {
-                this.child(
-                    h_flex()
-                        .p_2()
-                        .border_t_1()
-                        .border_color(cx.theme().colors().border_variant)
-                        .when(!self.confirming_delete_history, |this| {
-                            this.child(
-                                Button::new("delete_history", "Delete All History")
-                                    .full_width()
-                                    .style(ButtonStyle::Outlined)
-                                    .label_size(LabelSize::Small)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.prompt_delete_history(window, cx);
-                                    })),
-                            )
-                        })
-                        .when(self.confirming_delete_history, |this| {
-                            this.w_full()
-                                .gap_2()
-                                .flex_wrap()
-                                .justify_between()
-                                .child(
-                                    h_flex()
-                                        .flex_wrap()
-                                        .gap_1()
-                                        .child(
-                                            Label::new("Delete all threads?")
-                                                .size(LabelSize::Small),
-                                        )
-                                        .child(
-                                            Label::new("You won't be able to recover them later.")
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .child(
-                                            Button::new("cancel_delete", "Cancel")
-                                                .label_size(LabelSize::Small)
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.cancel_delete_history(window, cx);
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("confirm_delete", "Delete")
-                                                .style(ButtonStyle::Tinted(ui::TintColor::Error))
-                                                .color(Color::Error)
-                                                .label_size(LabelSize::Small)
-                                                .on_click(cx.listener(|_, _, window, cx| {
-                                                    window.dispatch_action(
-                                                        Box::new(RemoveHistory),
-                                                        cx,
-                                                    );
-                                                })),
-                                        ),
-                                )
-                        }),
-                )
-            })
+            
     }
 }
 

@@ -266,12 +266,27 @@ pub enum SessionListUpdate {
     },
 }
 
+
+pub struct AgentSessionSearchResult {
+    pub session_id: acp::SessionId,
+    pub snippet: Option<String>,
+}
+
 pub trait AgentSessionList {
     fn list_sessions(
         &self,
         request: AgentSessionListRequest,
         cx: &mut App,
     ) -> Task<Result<AgentSessionListResponse>>;
+
+    fn search_sessions(
+        &self,
+        _query: String,
+        _cx: &mut App,
+    ) -> Task<Result<Vec<AgentSessionSearchResult>>> {
+        Task::ready(Ok(Vec::new()))
+    }
+
 
     fn supports_delete(&self) -> bool {
         false

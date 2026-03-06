@@ -624,6 +624,42 @@ impl ThreadsDatabase {
             Ok(())
         })
     }
+
+    pub fn search_threads(&self, query: String) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
+        let connection = self.connection.clone();
+        let query = query.to_lowercase();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            let mut select = connection.select_bound::<(), (Arc<str>, DataType, Vec<u8>)>(indoc! {"
+                SELECT id, data_type, data FROM threads
+            "})?;
+            let mut matches = Vec::new();
+            for (id, data_type, data) in select(())? {
+                let json_data = match data_type {
+                    DataType::Zstd => zstd::decode_all(&data[..]).unwrap_or_default(),
+                    DataType::Json => data,
+                };
+                if let Ok(text) = String::from_utf8(json_data) {
+                    if let Some(pos) = text.to_lowercase().find(&query) {
+                        let start = text.floor_char_boundary(pos.saturating_sub(40));
+                        let end = text.ceil_char_boundary((pos + query.len() + 40).min(text.len()));
+                        
+                        let mut snippet = String::new();
+                        if start > 0 { snippet.push_str("..."); }
+                        snippet.push_str(&text[start..end]);
+                        if end < text.len() { snippet.push_str("..."); }
+                        
+                        matches.push(acp_thread::AgentSessionSearchResult {
+                            session_id: acp::SessionId::new(id),
+                            snippet: Some(snippet),
+                        });
+                    }
+                }
+            }
+            Ok(matches)
+        })
+    }
+
 }
 
 #[cfg(test)]

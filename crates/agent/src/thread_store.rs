@@ -87,6 +87,15 @@ impl ThreadStore {
         })
     }
 
+    pub fn search_threads(&self, query: String, cx: &mut App) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.background_spawn(async move {
+            let database = database_future.await.map_err(|err| anyhow::anyhow!(err))?;
+            database.search_threads(query).await
+        })
+    }
+
+
     pub fn reload(&self, cx: &mut Context<Self>) {
         let database_connection = ThreadsDatabase::connect(cx);
         cx.spawn(async move |this, cx| {
