@@ -322,6 +322,7 @@ async fn build_remote_server_from_source(
             new_command("cargo")
                 .args([
                     "zigbuild",
+                    "--release",
                     "--package",
                     "remote_server",
                     "--features",
@@ -338,7 +339,7 @@ async fn build_remote_server_from_source(
     let bin_path = Path::new("target")
         .join("remote_server")
         .join(&triple)
-        .join("debug")
+        .join("release")
         .join("remote_server")
         .with_extension(if platform.os.is_windows() { "exe" } else { "" });
 
