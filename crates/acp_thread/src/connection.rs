@@ -288,6 +288,15 @@ pub trait AgentSessionList {
     }
 
 
+    fn set_session_title(
+        &self,
+        _session_id: &acp::SessionId,
+        _title: String,
+        _cx: &mut App,
+    ) -> Task<Result<()>> {
+        Task::ready(Err(anyhow::anyhow!("set_session_title not supported")))
+    }
+
     fn supports_delete(&self) -> bool {
         false
     }

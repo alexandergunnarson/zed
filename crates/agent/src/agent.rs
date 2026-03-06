@@ -1512,6 +1512,18 @@ impl AgentSessionList for NativeAgentSessionList {
         Task::ready(Ok(AgentSessionListResponse::new(sessions)))
     }
 
+    
+    fn set_session_title(
+        &self,
+        session_id: &acp::SessionId,
+        title: String,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let store = self.thread_store.clone();
+        let session_id = session_id.clone();
+        store.update(cx, move |store, cx| store.update_thread_summary(session_id, title, cx))
+    }
+
     fn search_sessions(&self, query: String, cx: &mut App) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
         let store = self.thread_store.clone();
         store.update(cx, |store, cx| store.search_threads(query, cx))

@@ -38,6 +38,8 @@ pub struct ThreadHistory {
     visible_items: Vec<ListItemType>,
     local_timezone: UtcOffset,
     confirming_delete_history: bool,
+    renaming_session_id: Option<acp::SessionId>,
+    rename_editor: Entity<Editor>,
     _visible_items_task: Task<()>,
     _refresh_task: Task<()>,
     _watch_task: Option<Task<()>>,
@@ -96,6 +98,14 @@ impl ThreadHistory {
                 }
             });
 
+        
+        let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
+        let rename_editor_subscription = cx.subscribe(&rename_editor, |this, _editor, event, cx| {
+            if let EditorEvent::Blurred = event {
+                this.finish_renaming(cx);
+            }
+        });
+
         let scroll_handle = UniformListScrollHandle::default();
 
         let mut this = Self {
@@ -112,7 +122,9 @@ impl ThreadHistory {
             .unwrap(),
             search_query: SharedString::default(),
             confirming_delete_history: false,
-            _subscriptions: vec![search_editor_subscription],
+            renaming_session_id: None,
+            rename_editor: rename_editor.clone(),
+            _subscriptions: vec![search_editor_subscription, rename_editor_subscription],
             _visible_items_task: Task::ready(()),
             _refresh_task: Task::ready(()),
             _watch_task: None,
@@ -121,7 +133,17 @@ impl ThreadHistory {
         this
     }
 
-    fn update_visible_items(&mut self, preserve_selected_item: bool, cx: &mut Context<Self>) {
+    
+    fn finish_renaming(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.renaming_session_id.take() {
+            let new_title = self.rename_editor.read(cx).text(cx);
+            if let Some(list) = &self.session_list {
+                list.set_session_title(&session_id, new_title, cx).detach_and_log_err(cx);
+            }
+            cx.notify();
+        }
+    }
+fn update_visible_items(&mut self, preserve_selected_item: bool, cx: &mut Context<Self>) {
         let entries = self.sessions.clone();
         let new_list_items = if self.search_query.is_empty() {
             self.add_list_separators(entries, cx)
@@ -659,7 +681,7 @@ fn filter_search_results(
         cx: &Context<Self>,
     ) -> AnyElement {
         let selected = ix == self.selected_index;
-        let hovered = Some(ix) == self.hovered_index;
+        let _hovered = Some(ix) == self.hovered_index;
         let title = thread_title(entry).clone();
         
         v_flex()
@@ -684,9 +706,10 @@ fn filter_search_results(
                             )
                             .when_some(snippet.clone(), |this, snippet| {
                                 this.child(
-                                    Label::new(snippet)
+                                    Label::new(snippet.replace('\n', " ").replace('\r', ""))
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted)
+                                        .truncate()
                                 )
                             })
                     )
@@ -746,9 +769,17 @@ fn render_history_entry(
                             .gap_2()
                             .justify_between()
                             .child(
-                                HighlightedLabel::new(thread_title(entry), highlight_positions)
-                                    .size(LabelSize::Small)
-                                    .truncate(),
+                                
+                                if self.renaming_session_id.as_ref() == Some(&entry.session_id) {
+                                    div().w_full().child(self.rename_editor.clone()).on_action(cx.listener(|this, _: &menu::Confirm, _, cx| {
+                                        this.finish_renaming(cx);
+                                    })).into_any_element()
+                                } else {
+                                    HighlightedLabel::new(thread_title(entry), highlight_positions.clone())
+                                        .size(LabelSize::Small)
+                                        .truncate()
+                                        .into_any_element()
+                                }
                             )
                             .child(
                                 Label::new(display_text)
@@ -768,20 +799,44 @@ fn render_history_entry(
 
                         cx.notify();
                     }))
-                    .end_slot::<IconButton>(if hovered && self.supports_delete() {
+                    .end_slot::<AnyElement>(if hovered && self.supports_delete() {
                         Some(
-                            IconButton::new("delete", IconName::Trash)
-                                .shape(IconButtonShape::Square)
-                                .icon_size(IconSize::XSmall)
-                                .icon_color(Color::Muted)
-                                .tooltip(move |_window, cx| {
-                                    Tooltip::for_action("Delete", &RemoveSelectedThread, cx)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.remove_thread(ix, cx);
-                                    cx.stop_propagation()
-                                })),
-                        )
+                            h_flex().gap_1()
+                                .child(
+                                    IconButton::new("edit", IconName::Pencil)
+                                        .shape(IconButtonShape::Square)
+                                        .icon_size(IconSize::XSmall)
+                                        .icon_color(Color::Muted)
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::text("Rename")(window, cx)
+                                        })
+                                        .on_click(cx.listener({
+                                            let session_id = entry.session_id.clone();
+                                            let title = thread_title(entry).clone();
+                                            move |this, _, window, cx| {
+                                                this.renaming_session_id = Some(session_id.clone());
+                                                this.rename_editor.update(cx, |editor, cx| {
+                                                    editor.set_text(title.to_string(), window, cx);
+                                                });
+                                                this.rename_editor.focus_handle(cx).focus(window, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        }))
+                                )
+                                .child(
+                                    IconButton::new("delete", IconName::Trash)
+                                        .shape(IconButtonShape::Square)
+                                        .icon_size(IconSize::XSmall)
+                                        .icon_color(Color::Muted)
+                                        .tooltip(move |_window, cx| {
+                                            Tooltip::for_action("Delete", &RemoveSelectedThread, cx)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_thread(ix, cx);
+                                            cx.stop_propagation()
+                                        }))
+                                )
+                        ).map(IntoElement::into_any_element)
                     } else {
                         None
                     })

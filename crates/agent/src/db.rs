@@ -593,6 +593,19 @@ impl ThreadsDatabase {
             .spawn(async move { Self::save_thread_sync(&connection, id, thread, &folder_paths) })
     }
 
+    
+    pub fn update_thread_summary(&self, id: acp::SessionId, title: String) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            let mut update = connection.exec_bound::<(String, Arc<str>)>(indoc! {"
+                UPDATE threads SET summary = ? WHERE id = ?
+            "})?;
+            update((title, id.0.clone()))?;
+            Ok(())
+        })
+    }
+
     pub fn delete_thread(&self, id: acp::SessionId) -> Task<Result<()>> {
         let connection = self.connection.clone();
 
