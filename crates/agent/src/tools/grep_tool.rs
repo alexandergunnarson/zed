@@ -270,7 +270,9 @@ impl AgentTool for GrepTool {
 
                     while let Some((next_range, _, _)) = ranges.peek() {
                         if range.end.row >= next_range.start.row {
-                            range.end = next_range.end;
+                            if next_range.end.row > range.end.row || (next_range.end.row == range.end.row && next_range.end.column > range.end.column) {
+                                range.end = next_range.end.clone();
+                            }
                             ranges.next();
                         } else {
                             break;
