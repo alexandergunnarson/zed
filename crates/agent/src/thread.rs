@@ -2320,6 +2320,23 @@ impl Thread {
         let supports_images = self.model().is_some_and(|model| model.supports_images());
         let session_id = self.id.clone();
         let app_state = cx.to_async();
+        
+        if tool_name.as_ref() == "streaming_edit_file" {
+            if let Some(store) = crate::ThreadStore::try_global(cx) {
+                store.update(cx, |store, cx| {
+                    store.update_thread_stats(
+                        session_id.clone(),
+                        acp_thread::AgentStatus::Working,
+                        None,
+                        0,
+                        0,
+                        0,
+                        cx,
+                    ).detach();
+                });
+            }
+        }
+        
         let tool_result = tool.run(tool_input, tool_event_stream, cx);
         cx.foreground_executor().spawn(async move {
             let (is_error, output) = match tool_result.await {

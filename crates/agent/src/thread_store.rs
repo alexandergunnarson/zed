@@ -151,6 +151,23 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         })
 
     }
+
+    pub fn update_thread_status(
+        &mut self,
+        id: acp::SessionId,
+        status: acp_thread::AgentStatus,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, mut cx| {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            database.update_thread_status(id, status).await?;
+            this.update(cx, |this, cx| {
+                this.reload(cx);
+            }).ok();
+            Ok(())
+        })
+    }
 pub fn entries(&self) -> impl Iterator<Item = DbThreadMetadata> + '_ {
         self.threads.iter().cloned()
     }

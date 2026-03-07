@@ -649,6 +649,18 @@ impl ThreadsDatabase {
         })
     }
 
+
+    pub fn update_thread_status(&self, id: acp::SessionId, status: acp_thread::AgentStatus) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            let mut update = connection.exec_bound::<(String, Arc<str>)>(indoc! {"
+                UPDATE threads SET status = ?1 WHERE id = ?2
+            "})?;
+            update((status.as_str().to_string(), id.0.clone()))?;
+            Ok(())
+        })
+    }
 pub fn delete_thread(&self, id: acp::SessionId) -> Task<Result<()>> {
         let connection = self.connection.clone();
 

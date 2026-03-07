@@ -1021,6 +1021,17 @@ impl NativeAgentConnection {
             Ok(stream) => stream,
             Err(err) => return Task::ready(Err(err)),
         };
+        
+        if let Some(store) = crate::ThreadStore::try_global(cx) {
+            store.update(cx, |store, cx| {
+                store.update_thread_status(
+                    session_id.clone(),
+                    acp_thread::AgentStatus::Working,
+                    cx,
+                ).detach();
+            });
+        }
+        
         Self::handle_thread_events(response_stream, acp_thread.downgrade(), cx)
     }
 
@@ -1102,6 +1113,17 @@ impl NativeAgentConnection {
                             }
                             ThreadEvent::Stop(stop_reason) => {
                                 log::debug!("Assistant message complete: {:?}", stop_reason);
+                                acp_thread.update(cx, |thread, cx| {
+                                    if let Some(store) = crate::ThreadStore::try_global(cx) {
+                                        store.update(cx, |store, cx| {
+                                            store.update_thread_status(
+                                                thread.session_id().clone(),
+                                                acp_thread::AgentStatus::Idle,
+                                                cx,
+                                            ).detach();
+                                        });
+                                    }
+                                }).ok();
                                 return Ok(acp::PromptResponse::new(stop_reason));
                             }
                         }
