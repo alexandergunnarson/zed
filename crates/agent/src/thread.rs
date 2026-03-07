@@ -2318,10 +2318,47 @@ impl Thread {
             acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::InProgress),
         );
         let supports_images = self.model().is_some_and(|model| model.supports_images());
+        let session_id = self.id.clone();
+        let app_state = cx.to_async();
         let tool_result = tool.run(tool_input, tool_event_stream, cx);
         cx.foreground_executor().spawn(async move {
             let (is_error, output) = match tool_result.await {
                 Ok(mut output) => {
+                    // If it was the edit file tool, we can extract diff stats
+                    if tool_name.as_ref() == "streaming_edit_file" {
+                        let output_val = &output.raw_output;
+                        if let Some(diff) = output_val.get("diff").and_then(|d: &serde_json::Value| d.as_str()) {
+                            let mut lines_added = 0;
+                            let mut lines_deleted = 0;
+                            for line in diff.lines() {
+                                if line.starts_with('+') && !line.starts_with("+++") {
+                                    lines_added += 1;
+                                } else if line.starts_with('-') && !line.starts_with("---") {
+                                    lines_deleted += 1;
+                                }
+                            }
+                            
+                            let file_path = output_val.get("input_path").and_then(|p: &serde_json::Value| p.as_str()).unwrap_or("file");
+                            let summary = format!("Edited {}", file_path.split('/').last().unwrap_or(file_path));
+                            
+                            let _ = app_state.update(|cx| {
+                                if let Some(store) = crate::ThreadStore::try_global(cx) {
+                                    store.update(cx, |store, cx| {
+                                        store.update_thread_stats(
+                                            session_id.clone(),
+                                            acp_thread::AgentStatus::Idle,
+                                            Some(summary),
+                                            1,
+                                            lines_added,
+                                            lines_deleted,
+                                            cx,
+                                        )
+                                    }).detach();
+                                }
+                            });
+                        }
+                    }
+
                     if let LanguageModelToolResultContent::Image(_) = &output.llm_output
                         && !supports_images
                     {

@@ -130,7 +130,27 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         self.threads.is_empty()
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = DbThreadMetadata> + '_ {
+        pub fn update_thread_stats(
+        &mut self,
+        id: acp::SessionId,
+        status: acp_thread::AgentStatus,
+        last_action: Option<String>,
+        files_changed: i32,
+        lines_added: i32,
+        lines_deleted: i32,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, mut cx| {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            database.update_thread_stats(id, status, last_action, files_changed, lines_added, lines_deleted).await?;
+            this.update(cx, |this, cx| {
+                this.reload(cx);
+            })
+        })
+
+    }
+pub fn entries(&self) -> impl Iterator<Item = DbThreadMetadata> + '_ {
         self.threads.iter().cloned()
     }
 
