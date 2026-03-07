@@ -5,6 +5,7 @@ use agent_client_protocol as acp;
 use chrono::{Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use editor::{Editor, EditorEvent};
 use fuzzy::StringMatchCandidate;
+use ui::CommonAnimationExt;
 use gpui::{
     App, Entity, EventEmitter, FocusHandle, Focusable, ScrollStrategy, Task,
     UniformListScrollHandle, WeakEntity, Window, uniform_list,
@@ -842,6 +843,13 @@ impl ThreadHistory {
                                                     acp_thread::AgentStatus::Error => Color::Error,
                                                 })
                                                 .size(IconSize::Small)
+                                                .map(|icon| {
+                                                    if entry.status == acp_thread::AgentStatus::Working {
+                                                        icon.with_rotate_animation(2).into_any_element()
+                                                    } else {
+                                                        icon.into_any_element()
+                                                    }
+                                                })
                                             )
                                             .child(
                                                 div().flex_shrink().overflow_hidden().child(
