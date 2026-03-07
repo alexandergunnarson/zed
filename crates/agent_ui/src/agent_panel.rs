@@ -59,7 +59,7 @@ use extension::ExtensionEvents;
 use extension_host::ExtensionStore;
 use fs::Fs;
 use git::repository::validate_worktree_directory;
-use gpui::{
+use gpui::{InteractiveElement, 
     Action, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem, Corner,
     DismissEvent, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
     Subscription, Task, UpdateGlobal, WeakEntity, prelude::*, pulsating_between,
@@ -4421,6 +4421,20 @@ impl Render for AgentPanel {
                     h_flex()
                         .size_full()
                         .child(self.render_sidebar(cx))
+                        .child(
+                            div()
+                                .id("agent-sidebar-resizer")
+                                .w(px(8.))
+                                .h_full()
+                                .cursor_col_resize()
+                                .on_drag(DraggedAgentSidebar, |_, _, _, cx: &mut App| cx.new(|_| DraggedAgentSidebar))
+                                .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<DraggedAgentSidebar>, _window, cx| {
+                                    let new_width = e.event.position.x - e.bounds.left() + this.sidebar_width;
+                                    // clamp between 150px and 600px roughly
+                                    this.sidebar_width = new_width.max(px(150.)).min(px(600.));
+                                    cx.notify();
+                                }))
+                        )
                         .child(right_pane),
                 )
             })
@@ -4722,7 +4736,7 @@ mod tests {
     use assistant_text_thread::TextThreadStore;
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{InteractiveElement, TestAppContext, VisualTestContext};
     use project::Project;
     use serde_json::json;
     use workspace::MultiWorkspace;
