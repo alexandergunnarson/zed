@@ -774,6 +774,17 @@ impl AgentPanel {
         let acp_history = cx.new(|cx| ThreadHistory::new(None, window, cx));
         let text_thread_history =
             cx.new(|cx| TextThreadHistory::new(text_thread_store.clone(), window, cx));
+        cx.subscribe(
+            &thread_store,
+            |this, _, event, cx| match event {
+                agent::ThreadStoreEvent::Refreshed => {
+                    this.acp_history.update(cx, |history, cx| {
+                        history.refresh_full_history(cx);
+                    });
+                }
+            },
+        ).detach();
+
         cx.subscribe_in(
             &acp_history,
             window,

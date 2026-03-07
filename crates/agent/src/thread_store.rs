@@ -120,6 +120,7 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
                 .collect::<Vec<_>>();
             this.update(cx, |this, cx| {
                 this.threads = threads;
+                cx.emit(ThreadStoreEvent::Refreshed);
                 cx.notify();
             })
         })
@@ -382,3 +383,9 @@ mod tests {
         });
     }
 }
+
+pub enum ThreadStoreEvent {
+    Refreshed,
+}
+
+impl gpui::EventEmitter<ThreadStoreEvent> for ThreadStore {}
