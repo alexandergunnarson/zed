@@ -681,17 +681,48 @@ pub fn prompt_for_open_path_and_open(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let paths = workspace.prompt_for_open_path(
-        options,
-        DirectoryLister::Local(workspace.project().clone(), app_state.fs.clone()),
-        window,
-        cx,
-    );
+    let project = workspace.project().clone();
+    let is_remote = project.read(cx).is_via_remote_server();
+    let lister = if is_remote {
+        DirectoryLister::Project(project)
+    } else {
+        DirectoryLister::Local(project, app_state.fs.clone())
+    };
+
+    let paths = workspace.prompt_for_open_path(options, lister, window, cx);
     let multi_workspace_handle = window.window_handle().downcast::<MultiWorkspace>();
     cx.spawn_in(window, async move |this, cx| {
         let Some(paths) = paths.await.log_err().flatten() else {
             return;
         };
+
+        let is_remote = this
+            .update(cx, |this, cx| {
+                this.project().read(cx).is_via_remote_server()
+            })
+            .unwrap_or(false);
+
+        if is_remote {
+            let results = this.update_in(cx, |this, window, cx| {
+                this.open_paths(
+                    paths,
+                    OpenOptions {
+                        visible: Some(OpenVisible::All),
+                        ..Default::default()
+                    },
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            if let Ok(task) = results {
+                for result in task.await.into_iter().flatten() {
+                    result.log_err();
+                }
+            }
+            return;
+        }
+
         if !create_new_window {
             if let Some(handle) = multi_workspace_handle {
                 if let Some(task) = handle

@@ -1,9 +1,9 @@
 use super::{HoverTarget, HoveredWord, TerminalView};
 use anyhow::{Context as _, Result};
 use editor::Editor;
-use gpui::{App, AppContext, Context, Task, WeakEntity, Window};
+use gpui::{App, Context, Task, WeakEntity, Window};
 use itertools::Itertools;
-use project::{Entry, Metadata};
+use project::Entry;
 use std::path::PathBuf;
 use terminal::PathLikeTarget;
 use util::{
@@ -33,24 +33,23 @@ enum BackgroundFsChecks {
 #[derive(Debug, Clone)]
 enum OpenTarget {
     Worktree(PathWithPosition, Entry, #[cfg(test)] OpenTargetFoundBy),
-    File(PathWithPosition, Metadata),
+    File(PathWithPosition, bool),
 }
 
 impl OpenTarget {
     fn is_file(&self) -> bool {
         match self {
             OpenTarget::Worktree(_, entry, ..) => entry.is_file(),
-            OpenTarget::File(_, metadata) => !metadata.is_dir,
+            OpenTarget::File(_, is_dir) => !*is_dir,
         }
     }
 
     fn is_dir(&self) -> bool {
         match self {
             OpenTarget::Worktree(_, entry, ..) => entry.is_dir(),
-            OpenTarget::File(_, metadata) => metadata.is_dir,
+            OpenTarget::File(_, is_dir) => *is_dir,
         }
     }
-
     fn path(&self) -> &PathWithPosition {
         match self {
             OpenTarget::Worktree(path, ..) => path,
@@ -354,23 +353,37 @@ fn possible_open_target(
             Vec::new()
         };
 
-    let fs = workspace.read(cx).project().read(cx).fs().clone();
-    let background_fs_checks_task = cx.background_spawn(async move {
+    let project = workspace.read(cx).project().clone();
+    let background_fs_checks_task = cx.spawn(async move |cx| {
         for mut path_to_check in fs_paths_to_check {
-            if let Some(fs_path_to_check) = fs.canonicalize(&path_to_check.path).await.ok()
-                && let Some(metadata) = fs.metadata(&fs_path_to_check).await.ok().flatten()
-            {
-                if open_target
-                    .as_ref()
-                    .map(|open_target| open_target.path().path != fs_path_to_check)
-                    .unwrap_or(true)
-                {
-                    path_to_check.path = fs_path_to_check;
-                    return Some(OpenTarget::File(path_to_check, metadata));
-                }
+            let Some(resolved) = cx
+                .update(|cx| {
+                    project.update(cx, |project, cx| {
+                        project.resolve_abs_path(&path_to_check.path.to_string_lossy(), cx)
+                    })
+                })
+                .await
+            else {
+                continue;
+            };
 
-                break;
+            let (path, is_dir) = match resolved {
+                project::ResolvedPath::ProjectPath { is_dir, .. } => {
+                    (path_to_check.path.clone(), is_dir)
+                }
+                project::ResolvedPath::AbsPath { path, is_dir } => (PathBuf::from(path), is_dir),
+            };
+
+            if open_target
+                .as_ref()
+                .map(|open_target| open_target.path().path != path)
+                .unwrap_or(true)
+            {
+                path_to_check.path = path;
+                return Some(OpenTarget::File(path_to_check, is_dir));
             }
+
+            break;
         }
 
         open_target
