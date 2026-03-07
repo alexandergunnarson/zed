@@ -4420,21 +4420,34 @@ impl Render for AgentPanel {
                 parent.child(
                     h_flex()
                         .size_full()
-                        .child(self.render_sidebar(cx))
-                        .child(
+                                                .child(
                             div()
-                                .id("agent-sidebar-resizer")
-                                .w(px(8.))
+                                .relative()
                                 .h_full()
-                                .cursor_col_resize()
-                                .on_drag(DraggedAgentSidebar, |_, _, _, cx: &mut App| cx.new(|_| DraggedAgentSidebar))
-                                .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<DraggedAgentSidebar>, _window, cx| {
-                                    let new_width = e.event.position.x - e.bounds.left() + this.sidebar_width;
-                                    // clamp between 150px and 600px roughly
-                                    this.sidebar_width = new_width.max(px(150.)).min(px(600.));
-                                    cx.notify();
-                                }))
+                                .child(self.render_sidebar(cx))
+                                .child(
+                                    div()
+                                        .id("agent-sidebar-resizer")
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .right_0()
+                                        .w(px(8.))
+                                        .cursor_col_resize()
+                                        .on_drag(DraggedAgentSidebar, |_, _, _, cx: &mut App| cx.new(|_| DraggedAgentSidebar))
+                                        .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<DraggedAgentSidebar>, _window, cx| {
+                                            // Since the resizer is inside the sidebar container, its left bound is roughly the right edge of the sidebar.
+                                            // The simplest way to size it is relative to the drag event position in the app.
+                                            // But since the parent's `bounds.left` is the start of the dock, we can just use `e.event.position.x - panel_left`.
+                                            // Actually, `e.bounds.left()` is the left of the resizer itself.
+                                            // If we just track delta x:
+                                            let new_width = e.event.position.x - e.bounds.left() + this.sidebar_width;
+                                            this.sidebar_width = new_width.max(px(150.)).min(px(600.));
+                                            cx.notify();
+                                        }))
+                                )
                         )
+
                         .child(right_pane),
                 )
             })
