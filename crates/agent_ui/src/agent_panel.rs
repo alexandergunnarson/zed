@@ -542,7 +542,19 @@ impl ActiveView {
     }
 }
 
+
+#[derive(Clone)]
+#[allow(dead_code)]
+struct DraggedAgentSidebar;
+
+impl Render for DraggedAgentSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 pub struct AgentPanel {
+    sidebar_width: Pixels,
     workspace: WeakEntity<Workspace>,
     /// Workspace id is used as a database key
     workspace_id: Option<WorkspaceId>,
@@ -913,6 +925,7 @@ impl AgentPanel {
             agent_navigation_menu: None,
             _extension_subscription: extension_subscription,
             width: None,
+            sidebar_width: px(280.),
             height: None,
             zoomed: false,
             pending_serialization: None,
@@ -4280,7 +4293,7 @@ impl AgentPanel {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .w(px(280.))
+            .w(self.sidebar_width)
             .h_full()
             .border_r_1()
             .border_color(cx.theme().colors().border)
