@@ -25,6 +25,8 @@ pub type DbMessage = crate::Message;
 pub type DbSummary = crate::legacy_thread::DetailedSummaryState;
 pub type DbLanguageModel = crate::legacy_thread::SerializedLanguageModel;
 
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbThreadMetadata {
     pub id: acp::SessionId,
@@ -36,6 +38,12 @@ pub struct DbThreadMetadata {
     /// The workspace folder paths this thread was created against, sorted
     /// lexicographically. Used for grouping threads by project in the sidebar.
     pub folder_paths: PathList,
+
+    pub status: acp_thread::AgentStatus,
+    pub last_action_summary: Option<String>,
+    pub files_changed: i32,
+    pub lines_added: i32,
+    pub lines_deleted: i32,
 }
 
 impl From<&DbThreadMetadata> for acp_thread::AgentSessionInfo {
@@ -46,6 +54,11 @@ impl From<&DbThreadMetadata> for acp_thread::AgentSessionInfo {
             title: Some(meta.title.clone()),
             updated_at: Some(meta.updated_at),
             meta: None,
+            status: meta.status.clone(),
+            last_action_summary: meta.last_action_summary.clone(),
+            files_changed: meta.files_changed,
+            lines_added: meta.lines_added,
+            lines_deleted: meta.lines_deleted,
         }
     }
 }
@@ -421,6 +434,18 @@ impl ThreadsDatabase {
             s().ok();
         }
 
+        for query in [
+            "ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'idle'",
+            "ALTER TABLE threads ADD COLUMN last_action_summary TEXT",
+            "ALTER TABLE threads ADD COLUMN files_changed INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE threads ADD COLUMN lines_added INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE threads ADD COLUMN lines_deleted INTEGER NOT NULL DEFAULT 0",
+        ] {
+            if let Ok(mut s) = connection.exec(query) {
+                s().ok();
+            }
+}
+
         if let Ok(mut s) = connection.exec(indoc! {"
             ALTER TABLE threads ADD COLUMN created_at TEXT;
         "})
@@ -519,14 +544,14 @@ impl ThreadsDatabase {
             let connection = connection.lock();
 
             let mut select = connection
-                .select_bound::<(), (Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, Option<String>)>(indoc! {"
-                SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at FROM threads ORDER BY updated_at DESC, created_at DESC
+                .select_bound::<(), (Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, Option<String>, String, Option<String>, i32, i32, i32)>(indoc! {"
+                SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, status, last_action_summary, files_changed, lines_added, lines_deleted FROM threads ORDER BY updated_at DESC, created_at DESC
             "})?;
 
             let rows = select(())?;
             let mut threads = Vec::new();
 
-            for (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at) in rows {
+            for (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, status_str, last_action_summary, files_changed, lines_added, lines_deleted) in rows {
                 let folder_paths = folder_paths
                     .map(|paths| {
                         PathList::deserialize(&util::path_list::SerializedPathList {
@@ -548,6 +573,11 @@ impl ThreadsDatabase {
                     updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
                     created_at,
                     folder_paths,
+                    status: acp_thread::AgentStatus::from_str(&status_str),
+                    last_action_summary,
+                    files_changed,
+                    lines_added,
+                    lines_deleted,
                 });
             }
 
@@ -606,7 +636,20 @@ impl ThreadsDatabase {
         })
     }
 
-    pub fn delete_thread(&self, id: acp::SessionId) -> Task<Result<()>> {
+    
+    pub fn update_thread_stats(&self, id: acp::SessionId, status: acp_thread::AgentStatus, last_action: Option<String>, files_changed: i32, lines_added: i32, lines_deleted: i32) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            let mut update = connection.exec_bound::<(String, Option<String>, i32, i32, i32, Arc<str>)>(indoc! {"
+                UPDATE threads SET status = ?1, last_action_summary = ?2, files_changed = ?3, lines_added = ?4, lines_deleted = ?5 WHERE id = ?6
+            "})?;
+            update((status.as_str().to_string(), last_action, files_changed, lines_added, lines_deleted, id.0.clone()))?;
+            Ok(())
+        })
+    }
+
+pub fn delete_thread(&self, id: acp::SessionId) -> Task<Result<()>> {
         let connection = self.connection.clone();
 
         self.executor.spawn(async move {

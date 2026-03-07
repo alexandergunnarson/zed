@@ -775,6 +775,25 @@ impl AgentPanel {
                         cx,
                     );
                 }
+                ThreadHistoryEvent::Removed(session_id) => {
+                    this.background_threads.remove(session_id);
+                    let mut is_active = false;
+                    if let ActiveView::AgentThread { server_view } = &this.active_view {
+                        if server_view
+                            .read(cx)
+                            .active_thread()
+                            .map(|t| t.read(cx).id.clone())
+                            == Some(session_id.clone())
+                        {
+                            is_active = true;
+                        }
+                    }
+
+                    if is_active {
+                        let selected_agent = this.selected_agent.clone();
+                        this.new_agent_thread_inner(selected_agent, false, window, cx);
+                    }
+                }
             },
         )
         .detach();
@@ -1796,10 +1815,28 @@ impl AgentPanel {
                         cx.emit(AgentPanelEvent::ThreadFocused);
                         cx.notify();
                     }));
+
+                let active_session_id = server_view
+                    .read(cx)
+                    .active_thread()
+                    .map(|t| t.read(cx).id.clone());
+                self.acp_history.update(cx, |history, cx| {
+                    history.set_active_session_id(active_session_id, cx);
+                });
+
                 Some(
                     cx.observe_in(server_view, window, |this, server_view, window, cx| {
                         this._thread_view_subscription =
                             Self::subscribe_to_active_thread_view(&server_view, window, cx);
+
+                        let active_session_id = server_view
+                            .read(cx)
+                            .active_thread()
+                            .map(|t| t.read(cx).id.clone());
+                        this.acp_history.update(cx, |history, cx| {
+                            history.set_active_session_id(active_session_id, cx);
+                        });
+
                         cx.emit(AgentPanelEvent::ActiveViewChanged);
                         this.serialize(cx);
                         cx.notify();
@@ -1807,6 +1844,9 @@ impl AgentPanel {
                 )
             }
             _ => {
+                self.acp_history.update(cx, |history, cx| {
+                    history.set_active_session_id(None, cx);
+                });
                 self._thread_view_subscription = None;
                 self._active_thread_focus_subscription = None;
                 None
@@ -4246,17 +4286,14 @@ impl AgentPanel {
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().panel_background)
             .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .child(
-                        Button::new("new_thread", "New Chat")
-                            .full_width()
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_agent_thread(AgentType::NativeAgent, window, cx);
-                            }))
-                    )
+                h_flex().w_full().p_2().child(
+                    Button::new("new_thread", "New Chat")
+                        .full_width()
+                        .icon(IconName::Plus)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_agent_thread(AgentType::NativeAgent, window, cx);
+                        })),
+                ),
             )
             .child(self.acp_history.clone())
     }
@@ -4321,8 +4358,17 @@ impl Render for AgentPanel {
                         .child(server_view.clone())
                         .child(self.render_drag_target(cx)),
                     ActiveView::History { kind } => match kind {
-                        HistoryKind::AgentThreads => right_pane.child(div().size_full().flex().justify_center().items_center().child("Select a thread on the left")),
-                        HistoryKind::TextThreads => right_pane.child(self.text_thread_history.clone()),
+                        HistoryKind::AgentThreads => right_pane.child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .justify_center()
+                                .items_center()
+                                .child("Select a thread on the left"),
+                        ),
+                        HistoryKind::TextThreads => {
+                            right_pane.child(self.text_thread_history.clone())
+                        }
                     },
                     ActiveView::TextThread {
                         text_thread_editor,
@@ -4362,7 +4408,7 @@ impl Render for AgentPanel {
                     h_flex()
                         .size_full()
                         .child(self.render_sidebar(cx))
-                        .child(right_pane)
+                        .child(right_pane),
                 )
             })
             .children(self.render_trial_end_upsell(window, cx));

@@ -132,6 +132,11 @@ impl AgentSessionList for AcpSessionList {
                                 .map(|dt| dt.with_timezone(&chrono::Utc))
                         }),
                         meta: s.meta,
+                        status: acp_thread::AgentStatus::Idle,
+                        last_action_summary: None,
+                        files_changed: 0,
+                        lines_added: 0,
+                        lines_deleted: 0,
                     })
                     .collect(),
                 next_cursor: response.next_cursor,

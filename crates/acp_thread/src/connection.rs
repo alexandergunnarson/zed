@@ -217,6 +217,40 @@ pub struct AgentSessionListRequest {
     pub cwd: Option<PathBuf>,
     pub cursor: Option<String>,
     pub meta: Option<acp::Meta>,
+    pub status: AgentStatus,
+    pub last_action_summary: Option<String>,
+    pub files_changed: i32,
+    pub lines_added: i32,
+    pub lines_deleted: i32,
+
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AgentStatus {
+    #[default]
+    Idle,
+    Working,
+    AwaitingInput,
+    Error,
+}
+
+impl AgentStatus {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "working" => Self::Working,
+            "awaiting_input" => Self::AwaitingInput,
+            "error" => Self::Error,
+            _ => Self::Idle,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::AwaitingInput => "awaiting_input",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -235,7 +269,6 @@ impl AgentSessionListResponse {
         }
     }
 }
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentSessionInfo {
     pub session_id: acp::SessionId,
@@ -243,6 +276,12 @@ pub struct AgentSessionInfo {
     pub title: Option<SharedString>,
     pub updated_at: Option<DateTime<Utc>>,
     pub meta: Option<acp::Meta>,
+    pub status: AgentStatus,
+    pub last_action_summary: Option<String>,
+    pub files_changed: i32,
+    pub lines_added: i32,
+    pub lines_deleted: i32,
+
 }
 
 impl AgentSessionInfo {
@@ -253,6 +292,11 @@ impl AgentSessionInfo {
             title: None,
             updated_at: None,
             meta: None,
+            status: AgentStatus::Idle,
+            last_action_summary: None,
+            files_changed: 0,
+            lines_added: 0,
+            lines_deleted: 0,
         }
     }
 }

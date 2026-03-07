@@ -61,6 +61,11 @@ impl From<&ActiveThreadInfo> for acp_thread::AgentSessionInfo {
             title: Some(info.title.clone()),
             updated_at: Some(Utc::now()),
             meta: None,
+            status: acp_thread::AgentStatus::Idle,
+            last_action_summary: None,
+            files_changed: 0,
+            lines_added: 0,
+            lines_deleted: 0,
         }
     }
 }
