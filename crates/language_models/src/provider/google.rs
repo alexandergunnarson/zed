@@ -382,7 +382,10 @@ pub fn into_google(
             .flat_map(|content| match content {
                 language_model::MessageContent::Text(text) => {
                     if !text.is_empty() {
-                        vec![Part::TextPart(google_ai::TextPart { text })]
+                        vec![Part::TextPart(google_ai::TextPart {
+                            text,
+                            thought: false,
+                        })]
                     } else {
                         vec![]
                     }
@@ -622,7 +625,14 @@ impl GoogleEventMapper {
                     .into_iter()
                     .for_each(|part| match part {
                         Part::TextPart(text_part) => {
-                            events.push(Ok(LanguageModelCompletionEvent::Text(text_part.text)))
+                            if text_part.thought {
+                                events.push(Ok(LanguageModelCompletionEvent::Thinking {
+                                    text: text_part.text,
+                                    signature: None,
+                                }))
+                            } else {
+                                events.push(Ok(LanguageModelCompletionEvent::Text(text_part.text)))
+                            }
                         }
                         Part::InlineDataPart(_) => {}
                         Part::FunctionCallPart(function_call_part) => {
@@ -1219,6 +1229,7 @@ mod tests {
                     parts: vec![
                         Part::TextPart(TextPart {
                             text: "I'll help with that.".to_string(),
+                            thought: false,
                         }),
                         Part::FunctionCallPart(FunctionCallPart {
                             function_call: FunctionCall {

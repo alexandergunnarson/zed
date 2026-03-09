@@ -210,6 +210,8 @@ pub enum Part {
 #[serde(rename_all = "camelCase")]
 pub struct TextPart {
     pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub thought: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -294,10 +296,27 @@ pub struct UsageMetadata {
     pub total_token_count: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingConfig {
     pub thinking_budget: u32,
+}
+
+impl serde::Serialize for ThinkingConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ThinkingConfig", 2)?;
+        // We use 0 as a sentinel for models that have a dynamic thinking budget
+        // but still want to enable includeThoughts.
+        if self.thinking_budget > 0 {
+            state.serialize_field("thinkingBudget", &self.thinking_budget)?;
+        }
+        state.serialize_field("includeThoughts", &true)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -600,12 +619,12 @@ impl Model {
                 GoogleModelMode::Thinking {
                     // By default these models are set to "auto", so we preserve that behavior
                     // but indicate they are capable of thinking mode
-                    budget_tokens: None,
+                    budget_tokens: Some(0),
                 }
             }
             Self::Gemini3Flash => GoogleModelMode::Default,
             Self::Gemini31Pro => GoogleModelMode::Thinking {
-                budget_tokens: None,
+                budget_tokens: Some(0),
             },
             Self::Custom { mode, .. } => *mode,
         }

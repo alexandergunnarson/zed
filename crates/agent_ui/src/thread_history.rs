@@ -5,14 +5,13 @@ use agent_client_protocol as acp;
 use chrono::{Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use editor::{Editor, EditorEvent};
 use fuzzy::StringMatchCandidate;
-use ui::CommonAnimationExt;
 use gpui::{
-    App, Entity, EventEmitter, FocusHandle, Focusable, ScrollStrategy, Task,
-    UniformListScrollHandle, WeakEntity, Window, uniform_list,
+    App, Entity, EventEmitter, FocusHandle, Focusable, ListState, Task, WeakEntity, Window, list,
 };
 use std::{fmt::Display, ops::Range, rc::Rc};
 use text::Bias;
 use time::{OffsetDateTime, UtcOffset};
+use ui::CommonAnimationExt;
 use ui::{
     ElementId, HighlightedLabel, IconButtonShape, ListItem, ListItemSpacing, Tab, Tooltip,
     WithScrollbar, prelude::*,
@@ -33,7 +32,7 @@ pub struct ThreadHistory {
     active_session_id: Option<acp::SessionId>,
     pending_active_session_id_to_select: Option<acp::SessionId>,
     sessions: Vec<AgentSessionInfo>,
-    scroll_handle: UniformListScrollHandle,
+    list_state: ListState,
     selected_index: usize,
     hovered_index: Option<usize>,
     search_editor: Entity<Editor>,
@@ -59,6 +58,7 @@ enum ListItemType {
         entry: AgentSessionInfo,
         positions: Vec<usize>,
         snippet: Option<String>,
+        snippet_positions: Vec<usize>,
     },
 }
 
@@ -110,14 +110,14 @@ impl ThreadHistory {
                 }
             });
 
-        let scroll_handle = UniformListScrollHandle::default();
+        let list_state = gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(1000.));
 
         let mut this = Self {
             session_list: None,
             active_session_id: None,
             pending_active_session_id_to_select: None,
             sessions: Vec::new(),
-            scroll_handle,
+            list_state,
             selected_index: 0,
             hovered_index: None,
             visible_items: Default::default(),
@@ -215,6 +215,7 @@ impl ThreadHistory {
                     .unwrap_or(0);
 
                 this.visible_items = new_visible_items;
+                this.list_state.reset(this.visible_items.len());
                 this.set_selected_index(new_selected_index, Bias::Right, cx);
                 cx.notify();
             })
@@ -525,22 +526,67 @@ impl ThreadHistory {
                         entry,
                         positions: search_match.positions,
                         snippet: None,
+                        snippet_positions: Vec::new(),
                     }
                 })
                 .collect();
 
             if let Some(content_matches_task) = content_matches_task {
                 if let Ok(content_matches) = content_matches_task.await {
+                    let query_lower = query.to_lowercase();
+                    let query_lower_is_empty = query_lower.is_empty();
+
                     for match_res in content_matches {
                         if !title_matched_ids.contains(&match_res.session_id) {
                             if let Some(entry) = entries
                                 .iter()
                                 .find(|e| e.session_id == match_res.session_id)
                             {
+                                let mut snippet_positions = Vec::new();
+                                if let Some(ref snippet) = match_res.snippet {
+                                    if !query_lower_is_empty {
+                                        let mut text_lower = String::with_capacity(snippet.len());
+                                        let mut byte_indices = Vec::with_capacity(snippet.len());
+
+                                        for (idx, c) in snippet.char_indices() {
+                                            if c == '\r' {
+                                                continue;
+                                            }
+                                            let c = if c == '\n' { ' ' } else { c };
+                                            for lc in c.to_lowercase() {
+                                                text_lower.push(lc);
+                                                for _ in 0..lc.len_utf8() {
+                                                    byte_indices.push(idx);
+                                                }
+                                            }
+                                        }
+
+                                        let mut byte_idx = 0;
+                                        while let Some(match_idx) =
+                                            text_lower[byte_idx..].find(&query_lower)
+                                        {
+                                            let start = byte_idx + match_idx;
+                                            let end = start + query_lower.len();
+
+                                            let mut last_idx = None;
+                                            for i in start..end {
+                                                let orig_idx = byte_indices[i];
+                                                if Some(orig_idx) != last_idx {
+                                                    snippet_positions.push(orig_idx);
+                                                    last_idx = Some(orig_idx);
+                                                }
+                                            }
+                                            byte_idx = end;
+                                        }
+                                        snippet_positions.dedup();
+                                    }
+                                }
+
                                 result.push(ListItemType::SearchResult {
                                     entry: entry.clone(),
                                     positions: Vec::new(),
                                     snippet: match_res.snippet,
+                                    snippet_positions,
                                 });
                             }
                         }
@@ -591,8 +637,7 @@ impl ThreadHistory {
             };
         }
         self.selected_index = index;
-        self.scroll_handle
-            .scroll_to_item(index, ScrollStrategy::Top);
+        self.list_state.scroll_to_reveal_item(index);
         cx.notify()
     }
 
@@ -679,21 +724,6 @@ impl ThreadHistory {
         cx.notify();
     }
 
-    fn render_list_items(
-        &mut self,
-        range: Range<usize>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        self.visible_items
-            .get(range.clone())
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(ix, item)| self.render_list_item(item, range.start + ix, cx))
-            .collect()
-    }
-
     fn render_list_item(&self, item: &ListItemType, ix: usize, cx: &Context<Self>) -> AnyElement {
         match item {
             ListItemType::Entry { entry, format } => self
@@ -703,9 +733,15 @@ impl ThreadHistory {
                 entry,
                 positions,
                 snippet,
-            } => {
-                self.render_history_entry_search(entry, ix, positions.clone(), snippet.clone(), cx)
-            }
+                snippet_positions,
+            } => self.render_history_entry_search(
+                entry,
+                ix,
+                positions.clone(),
+                snippet.clone(),
+                snippet_positions.clone(),
+                cx,
+            ),
             ListItemType::BucketSeparator(bucket) => div()
                 .px(DynamicSpacing::Base06.rems(cx))
                 .pt_2()
@@ -725,6 +761,7 @@ impl ThreadHistory {
         ix: usize,
         highlight_positions: Vec<usize>,
         snippet: Option<String>,
+        snippet_positions: Vec<usize>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let selected = ix == self.selected_index;
@@ -752,10 +789,13 @@ impl ThreadHistory {
                             )
                             .when_some(snippet.clone(), |this, snippet| {
                                 this.child(
-                                    Label::new(snippet.replace('\n', " ").replace('\r', ""))
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
+                                    HighlightedLabel::new(
+                                        snippet.replace('\n', " ").replace('\r', ""),
+                                        snippet_positions.clone(),
+                                    )
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
                                 )
                             }),
                     )
@@ -831,87 +871,121 @@ impl ThreadHistory {
                                             .overflow_hidden()
                                             .child(
                                                 Icon::new(match entry.status {
-                                                    acp_thread::AgentStatus::Idle => IconName::Check,
-                                                    acp_thread::AgentStatus::Working => IconName::LoadCircle,
-                                                    acp_thread::AgentStatus::AwaitingInput => IconName::CircleHelp,
-                                                    acp_thread::AgentStatus::Error => IconName::Warning,
+                                                    acp_thread::AgentStatus::Idle => {
+                                                        IconName::Check
+                                                    }
+                                                    acp_thread::AgentStatus::Working => {
+                                                        IconName::LoadCircle
+                                                    }
+                                                    acp_thread::AgentStatus::AwaitingInput => {
+                                                        IconName::CircleHelp
+                                                    }
+                                                    acp_thread::AgentStatus::Error => {
+                                                        IconName::Warning
+                                                    }
                                                 })
                                                 .color(match entry.status {
                                                     acp_thread::AgentStatus::Idle => Color::Muted,
-                                                    acp_thread::AgentStatus::Working => Color::Accent,
-                                                    acp_thread::AgentStatus::AwaitingInput => Color::Warning,
+                                                    acp_thread::AgentStatus::Working => {
+                                                        Color::Accent
+                                                    }
+                                                    acp_thread::AgentStatus::AwaitingInput => {
+                                                        Color::Warning
+                                                    }
                                                     acp_thread::AgentStatus::Error => Color::Error,
                                                 })
                                                 .size(IconSize::Small)
                                                 .map(|icon| {
-                                                    if entry.status == acp_thread::AgentStatus::Working {
-                                                        icon.with_rotate_animation(2).into_any_element()
+                                                    if entry.status
+                                                        == acp_thread::AgentStatus::Working
+                                                    {
+                                                        icon.with_rotate_animation(2)
+                                                            .into_any_element()
                                                     } else {
                                                         icon.into_any_element()
                                                     }
-                                                })
+                                                }),
                                             )
-                                            .child(
-                                                div().flex_shrink().overflow_hidden().child(
-                                                    if self.renaming_session_id.as_ref() == Some(&entry.session_id) {
-                                                        div()
-                                                            .w_full()
-                                                            .child(self.rename_editor.clone())
-                                                            .on_action(cx.listener(|this, _: &menu::Confirm, _, cx| {
+                                            .child(div().flex_shrink().overflow_hidden().child(
+                                                if self.renaming_session_id.as_ref()
+                                                    == Some(&entry.session_id)
+                                                {
+                                                    div()
+                                                        .w_full()
+                                                        .child(self.rename_editor.clone())
+                                                        .on_action(cx.listener(
+                                                            |this, _: &menu::Confirm, _, cx| {
                                                                 this.finish_renaming(cx);
-                                                            }))
-                                                            .into_any_element()
-                                                    } else {
-                                                        HighlightedLabel::new(
-                                                            thread_title(entry),
-                                                            highlight_positions.clone(),
-                                                        )
-                                                        .size(LabelSize::Small)
-                                                        .truncate()
+                                                            },
+                                                        ))
                                                         .into_any_element()
-                                                    }
-                                                )
-                                            )
+                                                } else {
+                                                    HighlightedLabel::new(
+                                                        thread_title(entry),
+                                                        highlight_positions.clone(),
+                                                    )
+                                                    .size(LabelSize::Small)
+                                                    .truncate()
+                                                    .into_any_element()
+                                                },
+                                            )),
                                     )
                                     .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .child(
-                                                Label::new(display_text)
-                                                    .color(Color::Muted)
-                                                    .size(LabelSize::XSmall)
-                                            ),
+                                        div().flex_shrink_0().child(
+                                            Label::new(display_text)
+                                                .color(Color::Muted)
+                                                .size(LabelSize::XSmall),
+                                        ),
                                     ),
                             )
-                            .when(entry.last_action_summary.is_some() || entry.files_changed > 0, |v| {
-                                v.child(
-                                    h_flex()
-                                        .mt_1()
-                                        .w_full()
-                                        .justify_between()
-                                        .child(
-                                            Label::new(entry.last_action_summary.clone().unwrap_or_default())
+                            .when(
+                                entry.last_action_summary.is_some() || entry.files_changed > 0,
+                                |v| {
+                                    v.child(
+                                        h_flex()
+                                            .mt_1()
+                                            .w_full()
+                                            .justify_between()
+                                            .child(
+                                                Label::new(
+                                                    entry
+                                                        .last_action_summary
+                                                        .clone()
+                                                        .unwrap_or_default(),
+                                                )
                                                 .size(LabelSize::XSmall)
-                                                .color(Color::Muted)
-                                        )
-                                        .when(entry.files_changed > 0, |h| {
-                                            h.child(
-                                                h_flex()
-                                                    .gap_1()
-                                                    .child(
-                                                        Label::new(format!("+{} -{}", entry.lines_added, entry.lines_deleted))
-                                                            .size(LabelSize::XSmall)
-                                                            .color(if entry.lines_added > 0 { Color::Success } else { Color::Muted })
-                                                    )
-                                                    .child(
-                                                        Label::new(format!("• {} Files", entry.files_changed))
-                                                            .size(LabelSize::XSmall)
-                                                            .color(Color::Muted)
-                                                    )
+                                                .color(Color::Muted),
                                             )
-                                        })
-                                )
-                            })
+                                            .when(entry.files_changed > 0, |h| {
+                                                h.child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .child(
+                                                            Label::new(format!(
+                                                                "+{} -{}",
+                                                                entry.lines_added,
+                                                                entry.lines_deleted
+                                                            ))
+                                                            .size(LabelSize::XSmall)
+                                                            .color(if entry.lines_added > 0 {
+                                                                Color::Success
+                                                            } else {
+                                                                Color::Muted
+                                                            }),
+                                                        )
+                                                        .child(
+                                                            Label::new(format!(
+                                                                "• {} Files",
+                                                                entry.files_changed
+                                                            ))
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Muted),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                },
+                            ),
                     )
                     .tooltip(move |_, cx| {
                         Tooltip::with_meta(title.clone(), None, full_date.clone(), cx)
@@ -1038,19 +1112,18 @@ impl Render for ThreadHistory {
                         .child(Label::new("No threads match your search.").size(LabelSize::Small))
                 } else {
                     view.child(
-                        uniform_list(
-                            "thread-history",
-                            self.visible_items.len(),
-                            cx.processor(|this, range: Range<usize>, window, cx| {
-                                this.render_list_items(range, window, cx)
+                        list(
+                            self.list_state.clone(),
+                            cx.processor(|this, ix, _window, cx| {
+                                let item = this.visible_items.get(ix).unwrap();
+                                this.render_list_item(item, ix, cx)
                             }),
                         )
                         .p_1()
                         .pr_4()
-                        .track_scroll(&self.scroll_handle)
                         .flex_grow(),
                     )
-                    .vertical_scrollbar_for(&self.scroll_handle, window, cx)
+                    .vertical_scrollbar_for(&self.list_state, window, cx)
                 }
             })
     }
@@ -1429,6 +1502,11 @@ mod tests {
             cwd: None,
             title: Some(title.to_string().into()),
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }
     }
@@ -1640,6 +1718,11 @@ mod tests {
             cwd: None,
             title: Some("Original Title".into()),
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
@@ -1676,6 +1759,11 @@ mod tests {
             cwd: None,
             title: Some("Original Title".into()),
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
@@ -1709,6 +1797,11 @@ mod tests {
             cwd: None,
             title: Some("Original Title".into()),
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
@@ -1745,6 +1838,11 @@ mod tests {
             cwd: None,
             title: None,
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
@@ -1785,6 +1883,11 @@ mod tests {
             cwd: None,
             title: Some("Server Title".into()),
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
@@ -1822,6 +1925,11 @@ mod tests {
             cwd: None,
             title: Some("Original".into()),
             updated_at: None,
+            files_changed: 0,
+            last_action_summary: None,
+            lines_added: 0,
+            lines_deleted: 0,
+            status: acp_thread::AgentStatus::Idle,
             meta: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
