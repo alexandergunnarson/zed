@@ -2113,26 +2113,32 @@ impl Language {
     ) -> Vec<(Range<usize>, HighlightId)> {
         let mut result = Vec::new();
         if let Some(grammar) = &self.grammar {
-            let tree = grammar.parse_text(text, None);
-            let captures =
-                SyntaxSnapshot::single_tree_captures(range.clone(), text, &tree, self, |grammar| {
-                    grammar
-                        .highlights_config
-                        .as_ref()
-                        .map(|config| &config.query)
-                });
-            let highlight_maps = vec![grammar.highlight_map()];
-            let mut offset = 0;
-            for chunk in
-                BufferChunks::new(text, range, Some((captures, highlight_maps)), false, None)
-            {
-                let end_offset = offset + chunk.text.len();
-                if let Some(highlight_id) = chunk.syntax_highlight_id
-                    && !highlight_id.is_default()
+            if let Some(tree) = grammar.parse_text(text, None) {
+                let captures = SyntaxSnapshot::single_tree_captures(
+                    range.clone(),
+                    text,
+                    &tree,
+                    self,
+                    |grammar| {
+                        grammar
+                            .highlights_config
+                            .as_ref()
+                            .map(|config| &config.query)
+                    },
+                );
+                let highlight_maps = vec![grammar.highlight_map()];
+                let mut offset = 0;
+                for chunk in
+                    BufferChunks::new(text, range, Some((captures, highlight_maps)), false, None)
                 {
-                    result.push((offset..end_offset, highlight_id));
+                    let end_offset = offset + chunk.text.len();
+                    if let Some(highlight_id) = chunk.syntax_highlight_id
+                        && !highlight_id.is_default()
+                    {
+                        result.push((offset..end_offset, highlight_id));
+                    }
+                    offset = end_offset;
                 }
-                offset = end_offset;
             }
         }
         result
@@ -2365,22 +2371,20 @@ impl Grammar {
         self.id
     }
 
-    fn parse_text(&self, text: &Rope, old_tree: Option<Tree>) -> Tree {
+    fn parse_text(&self, text: &Rope, old_tree: Option<Tree>) -> Option<Tree> {
         with_parser(|parser| {
             parser
                 .set_language(&self.ts_language)
                 .expect("incompatible grammar");
             let mut chunks = text.chunks_in_range(0..text.len());
-            parser
-                .parse_with_options(
-                    &mut move |offset, _| {
-                        chunks.seek(offset);
-                        chunks.next().unwrap_or("").as_bytes()
-                    },
-                    old_tree.as_ref(),
-                    None,
-                )
-                .unwrap()
+            parser.parse_with_options(
+                &mut move |offset, _| {
+                    chunks.seek(offset);
+                    chunks.next().unwrap_or("").as_bytes()
+                },
+                old_tree.as_ref(),
+                None,
+            )
         })
     }
 
