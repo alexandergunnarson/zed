@@ -94,6 +94,15 @@ Added `stream_options: None` to Mercury edit-prediction request body.
 
 Files: `crates/edit_prediction/src/mercury.rs`
 
+## Performance: Git diff view with large change sets
+
+Fixes severe slowdowns when the uncommitted changes view has thousands of files (e.g. ~2,000), especially over remote development:
+
+- **Skip binary files early** — `load_buffers()` in `BranchDiff` now checks file extensions against a list of known binary formats (images, archives, executables, fonts, etc.) before attempting `open_buffer`. Previously every binary file triggered a full RPC round-trip that failed with `"Binary files are not supported"`. Files are still listed in the git panel for staging/committing.
+- **Debounce `DiffChanged` refreshes** — Each registered buffer's diff subscription triggers a full refresh of the project diff. With N buffers, a diff change at a `yield_now()` point during the refresh loop would cancel the in-progress refresh and restart from scratch, potentially preventing completion. `DiffChanged` now has a 50ms debounce so events coalesce before work begins. `StatusesChanged` and `EditorSaved` remain immediate.
+
+Files: `crates/project/src/git_store/branch_diff.rs`, `crates/git_ui/src/project_diff.rs`
+
 ## Build: Faster remote server uploads
 
 - **Release builds for remote server** — `cargo zigbuild --release` instead of debug, with corresponding binary path change.

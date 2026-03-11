@@ -39,6 +39,7 @@ use settings::{Settings, SettingsStore};
 use smol::future::yield_now;
 use std::any::{Any, TypeId};
 use std::sync::Arc;
+use std::time::Duration;
 use theme::ActiveTheme;
 use ui::{DiffStat, Divider, KeyBinding, Tooltip, prelude::*, vertical_divider};
 use util::{ResultExt as _, rel_path::RelPath};
@@ -78,7 +79,7 @@ pub struct ProjectDiff {
     focus_handle: FocusHandle,
     pending_scroll: Option<PathKey>,
     review_comment_count: usize,
-    _task: Task<Result<()>>,
+    _refresh_task: Task<Result<()>>,
     _subscription: Subscription,
 }
 
@@ -92,6 +93,7 @@ pub enum RefreshReason {
 const CONFLICT_SORT_PREFIX: u64 = 1;
 const TRACKED_SORT_PREFIX: u64 = 2;
 const NEW_SORT_PREFIX: u64 = 3;
+const REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 
 impl ProjectDiff {
     pub(crate) fn register(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
@@ -403,10 +405,7 @@ impl ProjectDiff {
             window,
             move |this, _git_store, event, window, cx| match event {
                 BranchDiffEvent::FileListChanged => {
-                    this._task = window.spawn(cx, {
-                        let this = cx.weak_entity();
-                        async |cx| Self::refresh(this, RefreshReason::StatusesChanged, cx).await
-                    })
+                    this.schedule_refresh(RefreshReason::StatusesChanged, window, cx);
                 }
             },
         );
@@ -421,12 +420,7 @@ impl ProjectDiff {
             if is_sort_by_path != was_sort_by_path
                 || is_collapse_untracked_diff != was_collapse_untracked_diff
             {
-                this._task = {
-                    window.spawn(cx, {
-                        let this = cx.weak_entity();
-                        async |cx| Self::refresh(this, RefreshReason::StatusesChanged, cx).await
-                    })
-                }
+                this.schedule_refresh(RefreshReason::StatusesChanged, window, cx);
             }
             was_sort_by_path = is_sort_by_path;
             was_collapse_untracked_diff = is_collapse_untracked_diff;
@@ -448,7 +442,7 @@ impl ProjectDiff {
             buffer_diff_subscriptions: Default::default(),
             pending_scroll: None,
             review_comment_count: 0,
-            _task: task,
+            _refresh_task: task,
             _subscription: Subscription::join(
                 branch_diff_subscription,
                 Subscription::join(editor_subscription, review_comment_subscription),
@@ -673,9 +667,7 @@ impl ProjectDiff {
                     .ok();
             }
             EditorEvent::Saved => {
-                self._task = cx.spawn_in(window, async move |this, cx| {
-                    Self::refresh(this, RefreshReason::EditorSaved, cx).await
-                });
+                self.schedule_refresh(RefreshReason::EditorSaved, window, cx);
             }
             _ => {}
         }
@@ -697,10 +689,7 @@ impl ProjectDiff {
         cx: &mut Context<Self>,
     ) -> Option<BufferId> {
         let subscription = cx.subscribe_in(&diff, window, move |this, _, _, window, cx| {
-            this._task = window.spawn(cx, {
-                let this = cx.weak_entity();
-                async |cx| Self::refresh(this, RefreshReason::DiffChanged, cx).await
-            })
+            this.schedule_refresh(RefreshReason::DiffChanged, window, cx);
         });
         self.buffer_diff_subscriptions
             .insert(path_key.path.clone(), (diff.clone(), subscription));
@@ -800,6 +789,23 @@ impl ProjectDiff {
     }
 
     #[instrument(skip_all)]
+    fn schedule_refresh(
+        &mut self,
+        reason: RefreshReason,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._refresh_task = window.spawn(cx, {
+            let this = cx.weak_entity();
+            async move |cx| {
+                if reason == RefreshReason::DiffChanged {
+                    cx.background_executor().timer(REFRESH_DEBOUNCE).await;
+                }
+                Self::refresh(this, reason, cx).await
+            }
+        });
+    }
+
     pub async fn refresh(
         this: WeakEntity<Self>,
         reason: RefreshReason,
@@ -889,6 +895,7 @@ impl ProjectDiff {
                 })?;
             }
         }
+
         this.update(cx, |this, cx| {
             if !buffers_to_fold.is_empty() {
                 this.editor.update(cx, |editor, cx| {
@@ -2849,6 +2856,8 @@ mod tests {
             ],
         );
         cx.run_until_parked();
+        cx.executor().advance_clock(REFRESH_DEBOUNCE);
+        cx.run_until_parked();
 
         let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
 
@@ -2954,6 +2963,8 @@ mod tests {
                 "# My cool project\nDetails to come.\n".to_owned(),
             )],
         );
+        cx.run_until_parked();
+        cx.executor().advance_clock(REFRESH_DEBOUNCE);
         cx.run_until_parked();
 
         let mut cx = EditorTestContext::for_editor_in(editor, cx).await;

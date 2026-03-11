@@ -12,6 +12,7 @@ use gpui::{
 };
 
 use language::Buffer;
+use std::path::Path;
 use text::BufferId;
 use util::ResultExt;
 use ztracing::instrument;
@@ -292,6 +293,9 @@ impl BranchDiff {
 
             for item in repo.read(cx).cached_status() {
                 seen.insert(item.repo_path.clone());
+                if likely_binary_path(item.repo_path.as_std_path()) {
+                    continue;
+                }
                 let branch_diff = self
                     .tree_diff
                     .as_ref()
@@ -324,6 +328,9 @@ impl BranchDiff {
 
             for (path, branch_diff) in tree_diff.entries.iter() {
                 if seen.contains(&path) {
+                    continue;
+                }
+                if likely_binary_path(path.as_std_path()) {
                     continue;
                 }
 
@@ -381,6 +388,32 @@ impl BranchDiff {
         });
         task
     }
+}
+
+fn likely_binary_path(path: &Path) -> bool {
+    const BINARY_EXTENSIONS: &[&str] = &[
+        // Compiled / object / executable
+        "o", "a", "so", "dylib", "dll", "exe", "obj", "lib", "pyc", "pyo", "class", "elc",
+        // Archives
+        "zip", "tar", "gz", "bz2", "xz", "zst", "7z", "rar", "jar", "war", "ear",
+        // Images (not SVG — that's text/XML)
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", "psd", "heic", "heif",
+        "avif", // Audio / video
+        "mp3", "mp4", "wav", "flac", "ogg", "avi", "mov", "mkv", "webm", "m4a", "aac", "wma", "wmv",
+        "flv", // Fonts
+        "ttf", "otf", "woff", "woff2", "eot", // Documents (binary formats)
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", // Databases
+        "db", "sqlite", "sqlite3", // Disk images / packages
+        "iso", "dmg", "deb", "rpm", "msi", "pkg", "snap", "appimage", // Misc binary
+        "bin", "dat", "DS_Store", "sysimage",
+    ];
+
+    let extension = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => ext,
+        None => return false,
+    };
+    let extension_lower = extension.to_ascii_lowercase();
+    BINARY_EXTENSIONS.contains(&extension_lower.as_str())
 }
 
 fn diff_status_to_file_status(branch_diff: &git::status::TreeDiffStatus) -> FileStatus {
