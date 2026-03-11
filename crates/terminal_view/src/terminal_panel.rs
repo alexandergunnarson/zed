@@ -9,6 +9,7 @@ use crate::{
 use breadcrumbs::Breadcrumbs;
 use collections::HashMap;
 use db::kvp::KEY_VALUE_STORE;
+use editor::Editor;
 use futures::{channel::oneshot, future::join_all};
 use gpui::{
     Action, AnyView, App, AsyncApp, AsyncWindowContext, Context, Corner, Entity, EventEmitter,
@@ -17,9 +18,13 @@ use gpui::{
 };
 use itertools::Itertools;
 use project::{Fs, Project};
-
+use schemars::JsonSchema;
+use serde::Deserialize;
 use settings::{Settings, TerminalDockPosition};
-use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
+use task::{
+    RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId,
+    substitute_variables_in_str,
+};
 use terminal::{Terminal, terminal_settings::TerminalSettings};
 use ui::{
     ButtonLike, Clickable, ContextMenu, FluentBuilder, PopoverMenu, SplitButton, Toggleable,
@@ -52,11 +57,24 @@ actions!(
     ]
 );
 
+/// Sends text to the active terminal, with support for task variable substitution
+/// (e.g. `$ZED_SELECTED_TEXT`, `$ZED_FILE`).
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
+#[action(namespace = terminal)]
+pub struct SendToTerminal {
+    text: String,
+    /// When true, uses bracketed paste mode, which is appropriate for sending
+    /// multi-line text to REPLs.
+    #[serde(default)]
+    paste: bool,
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, _: &mut Context<Workspace>| {
             workspace.register_action(TerminalPanel::new_terminal);
             workspace.register_action(TerminalPanel::open_terminal);
+            workspace.register_action(TerminalPanel::send_to_terminal);
             workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
                 if is_enabled_in_workspace(workspace, cx) {
                     workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
@@ -676,6 +694,42 @@ impl TerminalPanel {
             .detach_and_log_err(cx);
     }
 
+    fn send_to_terminal(
+        workspace: &mut Workspace,
+        action: &SendToTerminal,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(terminal_panel) = workspace.panel::<TerminalPanel>(cx) else {
+            return;
+        };
+        let task_context_task = workspace
+            .active_item(cx)
+            .and_then(|item| item.act_as::<Editor>(cx))
+            .map(|editor| editor.update(cx, |editor, cx| editor.task_context(window, cx)));
+        let text_template = action.text.clone();
+        let use_paste = action.paste;
+
+        cx.spawn(async move |_workspace, cx| {
+            let task_context = match task_context_task {
+                Some(task) => task.await,
+                None => None,
+            };
+            let resolved_text = match &task_context {
+                Some(context) => substitute_variables_in_str(&text_template, context),
+                None => Some(text_template),
+            };
+            let Some(resolved_text) = resolved_text else {
+                anyhow::bail!("Failed to resolve task variables in SendToTerminal text");
+            };
+            terminal_panel.update(cx, |panel, cx| {
+                panel.send_text_to_active_terminal(&resolved_text, use_paste, cx);
+            });
+            Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
     fn terminals_for_task(
         &self,
         label: &str,
@@ -1110,6 +1164,25 @@ impl TerminalPanel {
                 })
             })
             .collect()
+    }
+
+    pub fn send_text_to_active_terminal(&self, text: &str, paste: bool, cx: &mut Context<Self>) {
+        let Some(terminal_view) = self
+            .active_pane
+            .read(cx)
+            .active_item()
+            .and_then(|item| item.downcast::<TerminalView>())
+        else {
+            return;
+        };
+        let terminal = terminal_view.read(cx).terminal().clone();
+        terminal.update(cx, |terminal, _cx| {
+            if paste {
+                terminal.paste(text);
+            } else {
+                terminal.input(text.as_bytes().to_vec());
+            }
+        });
     }
 
     fn is_enabled(&self, cx: &App) -> bool {
