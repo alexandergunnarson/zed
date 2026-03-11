@@ -1,66 +1,103 @@
-# Changes from main
+# Changes from upstream
 
-## New feature: `terminal::SendToTerminal` action
+All changes on this fork relative to `zed-industries/zed` (merge-base `e784c92e3c`), organized by area.
 
-Adds a new workspace-level action `terminal::SendToTerminal` that sends text to the active terminal with support for task variable substitution (e.g. `$ZED_SELECTED_TEXT`, `$ZED_FILE`).
+## Feature: Agent panel master-detail layout with sidebar
 
-This is analogous to VSCode's `workbench.action.terminal.sendSequence` command, enabling workflows like sending selected editor text to a running REPL.
+Replaces the stacked agent panel layout with a persistent sidebar (thread list) + right pane (active thread). Includes:
 
-### Action schema
+- **Sidebar with thread list** always visible alongside the active conversation, with a "New Chat" button.
+- **Draggable resizer** between sidebar and thread pane (min 150px, max 600px).
+- **Active session highlighting** — the sidebar tracks and highlights the currently open thread.
+- **Thread deletion** immediately removes the entry from the sidebar and switches to a new thread if the active one was deleted.
+
+Files: `crates/agent_ui/src/agent_panel.rs`
+
+## Feature: Thread history enhancements
+
+- **Content search** — search now queries thread message bodies (not just titles), showing matched snippets with highlighted positions. Uses `AgentSessionList::search_sessions()` backed by full-text scan of thread data.
+- **Inline rename** — thread titles can be renamed in-place via an editor widget, persisted through `AgentSessionList::set_session_title()`.
+- **Collapsible tool calls** in the thread view.
+- **Switched from `uniform_list` to `ListState`** for more flexible item rendering.
+
+Files: `crates/agent_ui/src/thread_history.rs`, `crates/agent_ui/src/connection_view/thread_view.rs`
+
+## Feature: Agent thread status & diff stats tracking
+
+Tracks per-thread status and cumulative diff statistics:
+
+- **`AgentStatus` enum** (`Idle`, `Working`, `AwaitingInput`, `Error`) on `AgentSessionInfo`.
+- **Diff stats** (`files_changed`, `lines_added`, `lines_deleted`) extracted from `streaming_edit_file` tool output.
+- **Persisted to SQLite** via `ALTER TABLE` migrations adding `status`, `last_action_summary`, `files_changed`, `lines_added`, `lines_deleted` columns.
+- **Status transitions** plumbed from `NativeAgentConnection` (set `Working` on prompt, `Idle` on stop) through `ThreadStore` events to the UI.
+- **Animated working indicator** in the sidebar for threads with `Working` status.
+
+Files: `crates/acp_thread/src/connection.rs`, `crates/agent/src/agent.rs`, `crates/agent/src/thread.rs`, `crates/agent/src/thread_store.rs`, `crates/agent/src/db.rs`, `crates/agent_servers/src/acp.rs`, `crates/sqlez/src/bindable.rs`, `crates/sidebar/src/sidebar.rs`
+
+## Feature: `terminal::SendToTerminal` action
+
+Workspace-level action that sends text to the active terminal with `$ZED_*` task variable substitution. Analogous to VSCode's `workbench.action.terminal.sendSequence`.
 
 ```json
-["terminal::SendToTerminal", { "text": "...", "paste": false }]
+["terminal::SendToTerminal", { "text": "$ZED_SELECTED_TEXT\n", "paste": true }]
 ```
 
-| Field   | Type     | Default | Description |
-|---------|----------|---------|-------------|
-| `text`  | `string` | (required) | The text to send. Supports all `$ZED_*` task variables and `${VAR:default}` syntax. |
-| `paste` | `bool`   | `false` | When `true`, uses bracketed paste mode (`\x1b[200~`...`\x1b[201~`), which is appropriate for sending multi-line text to REPLs. |
+- `text`: supports all task variables (`$ZED_SELECTED_TEXT`, `$ZED_FILE`, etc.) and `${VAR:default}` syntax.
+- `paste`: when `true`, wraps in bracketed paste escape sequences.
+- Registered as a workspace action (works from the editor, not just terminal focus).
+- Reuses the task system's `substitute_variables_in_str()` for variable resolution.
 
-### Supported variables
+Files: `crates/terminal_view/src/terminal_panel.rs`
 
-All standard task variables are available:
+## Feature: OpenAI `stream_options` with `include_usage`
 
-- `$ZED_SELECTED_TEXT` — the current editor selection
-- `$ZED_FILE` — absolute path of the current file
-- `$ZED_RELATIVE_FILE` — path relative to worktree root
-- `$ZED_FILENAME` — filename only
-- `$ZED_STEM` — filename without extension
-- `$ZED_DIRNAME` — absolute path of the file's parent directory
-- `$ZED_WORKTREE_ROOT` — absolute path of the worktree root
-- `$ZED_ROW` — cursor row (1-indexed)
-- `$ZED_COLUMN` — cursor column (1-indexed)
-- `$ZED_SYMBOL` — symbol at cursor position
+Passes `stream_options: { include_usage: true }` when streaming from OpenAI-compatible providers, so token usage is reported in stream responses.
 
-### Example: send selected text to a Julia REPL
+Files: `crates/open_ai/src/open_ai.rs`, `crates/language_models/src/provider/open_ai.rs`
 
-In `~/.config/zed/keymap.json`:
+## Feature: Google Gemini thinking mode improvements
 
-```json
-[
-  {
-    "context": "Editor && mode == full",
-    "bindings": {
-      "cmd-enter": [
-        "terminal::SendToTerminal",
-        { "text": "$ZED_SELECTED_TEXT\n", "paste": true }
-      ]
-    }
-  }
-]
-```
+- **`ThinkingConfig` serialization** conditionally omits `thinkingBudget` when set to 0 (sentinel for "auto" mode), and always includes `includeThoughts: true`.
+- **`thought` field on `TextPart`** distinguishes thinking content from regular text, mapped to `LanguageModelCompletionEvent::Thinking`.
+- Default thinking-capable models use `budget_tokens: Some(0)` instead of `None` to enable thought streaming.
 
-### Design notes
+Files: `crates/google_ai/src/google_ai.rs`, `crates/language_models/src/provider/google.rs`
 
-- **Purely additive.** The existing `terminal::SendText` action is unchanged. No keybindings, APIs, or docs were modified.
-- **Workspace-level registration.** Unlike `terminal::SendText` (which only works when a terminal is focused), `SendToTerminal` is registered as a workspace action so it can read from the active editor and forward to the terminal panel.
-- **Variable resolution reuses the task system.** The action calls `Editor::task_context()` and `substitute_variables_in_str()` from the `task` crate — the same machinery used by Zed's task runner.
-- **`paste` vs raw input.** When `paste` is `false`, text is sent via `Terminal::input()` (raw bytes, no escaping). When `true`, text is sent via `Terminal::paste()`, which wraps in bracketed paste escape sequences when the terminal has that mode enabled.
+## Bugfix: Grep tool infinite loop on overlapping ranges
 
-### Files changed
+When merging overlapping match ranges, the code unconditionally set `range.end = next_range.end`, which could *shrink* the range if the next match ended earlier, causing the merge loop to never terminate. Fixed to only expand.
 
-- `crates/terminal_view/src/terminal_panel.rs`
-  - Added `SendToTerminal` action struct
-  - Added `TerminalPanel::send_to_terminal` workspace action handler
-  - Added `TerminalPanel::send_text_to_active_terminal` method
-  - Registered the action in `init()`
+Files: `crates/agent/src/tools/grep_tool.rs`
+
+## Bugfix: Cannot open files outside workspace in remote projects
+
+- `terminal_path_like_target.rs`: replaced direct `fs.canonicalize()`/`fs.metadata()` calls (which fail on remote) with `project.resolve_abs_path()`.
+- `workspace.rs`: for remote projects, uses `DirectoryLister::Project` and opens paths directly via `open_paths()` instead of trying to create a new local window.
+
+Files: `crates/terminal_view/src/terminal_path_like_target.rs`, `crates/workspace/src/workspace.rs`
+
+## Bugfix: Crash in `Grammar::parse_text` when tree-sitter returns `None`
+
+`parse_with_options()` can return `None` (e.g. cancelled parse). Changed return type from `Tree` to `Option<Tree>` and updated `highlight_text` to skip highlighting gracefully instead of panicking.
+
+Files: `crates/language/src/language.rs`
+
+## Bugfix: Show token ring instead of split display for Anthropic custom models
+
+Anthropic custom models don't support split input/output token counts. Overrides `supports_split_token_display()` to return `false`.
+
+Files: `crates/language_models/src/provider/anthropic.rs`
+
+## Bugfix: Compilation error from `stream_options` addition
+
+Added `stream_options: None` to Mercury edit-prediction request body.
+
+Files: `crates/edit_prediction/src/mercury.rs`
+
+## Build: Faster remote server uploads
+
+- **Release builds for remote server** — `cargo zigbuild --release` instead of debug, with corresponding binary path change.
+- **`strip = true`** added to release profile in root `Cargo.toml`.
+- **Reduced dev debug info** — `debug = 1` for workspace crates, `debug = false` for dependencies and build-override to speed up incremental builds.
+
+Files: `Cargo.toml`, `crates/remote/src/transport.rs`
