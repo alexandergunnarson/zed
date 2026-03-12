@@ -1021,17 +1021,15 @@ impl NativeAgentConnection {
             Ok(stream) => stream,
             Err(err) => return Task::ready(Err(err)),
         };
-        
+
         if let Some(store) = crate::ThreadStore::try_global(cx) {
             store.update(cx, |store, cx| {
-                store.update_thread_status(
-                    session_id.clone(),
-                    acp_thread::AgentStatus::Working,
-                    cx,
-                ).detach();
+                store
+                    .update_thread_status(session_id.clone(), acp_thread::AgentStatus::Working, cx)
+                    .detach();
             });
         }
-        
+
         Self::handle_thread_events(response_stream, acp_thread.downgrade(), cx)
     }
 
@@ -1113,17 +1111,31 @@ impl NativeAgentConnection {
                             }
                             ThreadEvent::Stop(stop_reason) => {
                                 log::debug!("Assistant message complete: {:?}", stop_reason);
-                                acp_thread.update(cx, |thread, cx| {
-                                    if let Some(store) = crate::ThreadStore::try_global(cx) {
-                                        store.update(cx, |store, cx| {
-                                            store.update_thread_status(
-                                                thread.session_id().clone(),
-                                                acp_thread::AgentStatus::Idle,
-                                                cx,
-                                            ).detach();
-                                        });
-                                    }
-                                }).ok();
+                                acp_thread
+                                    .update(cx, |thread, cx| {
+                                        if let Some(store) = crate::ThreadStore::try_global(cx) {
+                                            let session_id = thread.session_id().clone();
+                                            store.update(cx, |store, cx| {
+                                                store
+                                                    .update_thread_status(
+                                                        session_id.clone(),
+                                                        acp_thread::AgentStatus::Idle,
+                                                        cx,
+                                                    )
+                                                    .detach();
+                                                store
+                                                    .update_thread_workflow_status(
+                                                        session_id,
+                                                        Some(
+                                                            acp_thread::WorkflowStatus::NeedsReview,
+                                                        ),
+                                                        cx,
+                                                    )
+                                                    .detach();
+                                            });
+                                        }
+                                    })
+                                    .ok();
                                 return Ok(acp::PromptResponse::new(stop_reason));
                             }
                         }
@@ -1534,7 +1546,6 @@ impl AgentSessionList for NativeAgentSessionList {
         Task::ready(Ok(AgentSessionListResponse::new(sessions)))
     }
 
-    
     fn set_session_title(
         &self,
         session_id: &acp::SessionId,
@@ -1543,14 +1554,32 @@ impl AgentSessionList for NativeAgentSessionList {
     ) -> Task<Result<()>> {
         let store = self.thread_store.clone();
         let session_id = session_id.clone();
-        store.update(cx, move |store, cx| store.update_thread_summary(session_id, title, cx))
+        store.update(cx, move |store, cx| {
+            store.update_thread_summary(session_id, title, cx)
+        })
     }
 
-    fn search_sessions(&self, query: String, cx: &mut App) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
+    fn set_session_workflow_status(
+        &self,
+        session_id: &acp::SessionId,
+        status: Option<acp_thread::WorkflowStatus>,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let store = self.thread_store.clone();
+        let session_id = session_id.clone();
+        store.update(cx, move |store, cx| {
+            store.update_thread_workflow_status(session_id, status, cx)
+        })
+    }
+
+    fn search_sessions(
+        &self,
+        query: String,
+        cx: &mut App,
+    ) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
         let store = self.thread_store.clone();
         store.update(cx, |store, cx| store.search_threads(query, cx))
     }
-
 
     fn supports_delete(&self) -> bool {
         true

@@ -78,19 +78,23 @@ impl ThreadStore {
         })
     }
 
-    
-    pub fn update_thread_summary(&mut self, id: acp::SessionId, title: String, cx: &mut Context<Self>) -> Task<Result<()>> {
+    pub fn update_thread_summary(
+        &mut self,
+        id: acp::SessionId,
+        title: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
         if let Some(thread) = self.threads.iter_mut().find(|t| t.id == id) {
             thread.title = title.clone().into();
         }
-        
+
         let database_future = ThreadsDatabase::connect(cx);
         cx.background_spawn(async move {
             let database = database_future.await.map_err(|err| anyhow::anyhow!(err))?;
             database.update_thread_summary(id, title).await
         })
     }
-pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+    pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         let database_future = ThreadsDatabase::connect(cx);
         cx.spawn(async move |this, cx| {
             let database = database_future.await.map_err(|err| anyhow!(err))?;
@@ -99,14 +103,17 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         })
     }
 
-    pub fn search_threads(&self, query: String, cx: &mut App) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
+    pub fn search_threads(
+        &self,
+        query: String,
+        cx: &mut App,
+    ) -> Task<Result<Vec<acp_thread::AgentSessionSearchResult>>> {
         let database_future = ThreadsDatabase::connect(cx);
         cx.background_spawn(async move {
             let database = database_future.await.map_err(|err| anyhow::anyhow!(err))?;
             database.search_threads(query).await
         })
     }
-
 
     pub fn reload(&self, cx: &mut Context<Self>) {
         let database_connection = ThreadsDatabase::connect(cx);
@@ -131,7 +138,7 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         self.threads.is_empty()
     }
 
-        pub fn update_thread_stats(
+    pub fn update_thread_stats(
         &mut self,
         id: acp::SessionId,
         status: acp_thread::AgentStatus,
@@ -144,12 +151,20 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         let database_future = ThreadsDatabase::connect(cx);
         cx.spawn(async move |this, mut cx| {
             let database = database_future.await.map_err(|err| anyhow!(err))?;
-            database.update_thread_stats(id, status, last_action, files_changed, lines_added, lines_deleted).await?;
+            database
+                .update_thread_stats(
+                    id,
+                    status,
+                    last_action,
+                    files_changed,
+                    lines_added,
+                    lines_deleted,
+                )
+                .await?;
             this.update(cx, |this, cx| {
                 this.reload(cx);
             })
         })
-
     }
 
     pub fn update_thread_status(
@@ -164,11 +179,30 @@ pub fn delete_threads(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
             database.update_thread_status(id, status).await?;
             this.update(cx, |this, cx| {
                 this.reload(cx);
-            }).ok();
+            })
+            .ok();
             Ok(())
         })
     }
-pub fn entries(&self) -> impl Iterator<Item = DbThreadMetadata> + '_ {
+
+    pub fn update_thread_workflow_status(
+        &mut self,
+        id: acp::SessionId,
+        status: Option<acp_thread::WorkflowStatus>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, mut cx| {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            database.update_thread_workflow_status(id, status).await?;
+            this.update(cx, |this, cx| {
+                this.reload(cx);
+            })
+            .ok();
+            Ok(())
+        })
+    }
+    pub fn entries(&self) -> impl Iterator<Item = DbThreadMetadata> + '_ {
         self.threads.iter().cloned()
     }
 

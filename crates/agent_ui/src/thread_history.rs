@@ -1,20 +1,23 @@
 use crate::ConnectionView;
 use crate::{AgentPanel, RemoveHistory, RemoveSelectedThread};
-use acp_thread::{AgentSessionInfo, AgentSessionList, AgentSessionListRequest, SessionListUpdate};
+use acp_thread::{
+    AgentSessionInfo, AgentSessionList, AgentSessionListRequest, SessionListUpdate, WorkflowStatus,
+};
+use agent::ThreadStore;
 use agent_client_protocol as acp;
 use chrono::{Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use editor::{Editor, EditorEvent};
 use fuzzy::StringMatchCandidate;
 use gpui::{
-    App, Entity, EventEmitter, FocusHandle, Focusable, ListState, Task, WeakEntity, Window, list,
+    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ListState, MouseButton,
+    MouseDownEvent, Pixels, Point, Subscription, Task, WeakEntity, Window, list,
 };
-use std::{fmt::Display, ops::Range, rc::Rc};
+use std::{fmt::Display, rc::Rc};
 use text::Bias;
 use time::{OffsetDateTime, UtcOffset};
-use ui::CommonAnimationExt;
 use ui::{
-    ElementId, HighlightedLabel, IconButtonShape, ListItem, ListItemSpacing, Tab, Tooltip,
-    WithScrollbar, prelude::*,
+    ContextMenu, ElementId, HighlightedLabel, IconButtonShape, LabelCommon, ListItem,
+    ListItemSpacing, SpinnerLabel, Tab, Tooltip, WithScrollbar, prelude::*,
 };
 
 const DEFAULT_TITLE: &SharedString = &SharedString::new_static("New Thread");
@@ -42,6 +45,7 @@ pub struct ThreadHistory {
     confirming_delete_history: bool,
     renaming_session_id: Option<acp::SessionId>,
     rename_editor: Entity<Editor>,
+    context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     _visible_items_task: Task<()>,
     _refresh_task: Task<()>,
     _watch_task: Option<Task<()>>,
@@ -50,6 +54,7 @@ pub struct ThreadHistory {
 
 enum ListItemType {
     BucketSeparator(TimeBucket),
+    DoneSeparator,
     Entry {
         entry: AgentSessionInfo,
         format: EntryTimeFormat,
@@ -130,6 +135,7 @@ impl ThreadHistory {
             confirming_delete_history: false,
             renaming_session_id: None,
             rename_editor: rename_editor.clone(),
+            context_menu: None,
             _subscriptions: vec![search_editor_subscription, rename_editor_subscription],
             _visible_items_task: Task::ready(()),
             _refresh_task: Task::ready(()),
@@ -237,6 +243,7 @@ impl ThreadHistory {
         self.session_list = session_list;
         self.sessions.clear();
         self.visible_items.clear();
+        self.list_state.reset(0);
         self.selected_index = 0;
         self._visible_items_task = Task::ready(());
         self._refresh_task = Task::ready(());
@@ -456,7 +463,8 @@ impl ThreadHistory {
         cx: &App,
     ) -> Task<Vec<ListItemType>> {
         cx.background_spawn(async move {
-            let mut items = Vec::with_capacity(entries.len() + 1);
+            let mut active_items = Vec::with_capacity(entries.len() + 1);
+            let mut done_items = Vec::new();
             let mut bucket = None;
             let today = Local::now().naive_local().date();
 
@@ -469,17 +477,30 @@ impl ThreadHistory {
                     })
                     .unwrap_or(TimeBucket::All);
 
-                if Some(entry_bucket) != bucket {
-                    bucket = Some(entry_bucket);
-                    items.push(ListItemType::BucketSeparator(entry_bucket));
-                }
+                if entry.workflow_status == Some(WorkflowStatus::Done) {
+                    done_items.push(ListItemType::Entry {
+                        entry,
+                        format: entry_bucket.into(),
+                    });
+                } else {
+                    if Some(entry_bucket) != bucket {
+                        bucket = Some(entry_bucket);
+                        active_items.push(ListItemType::BucketSeparator(entry_bucket));
+                    }
 
-                items.push(ListItemType::Entry {
-                    entry,
-                    format: entry_bucket.into(),
-                });
+                    active_items.push(ListItemType::Entry {
+                        entry,
+                        format: entry_bucket.into(),
+                    });
+                }
             }
-            items
+
+            if !done_items.is_empty() {
+                active_items.push(ListItemType::DoneSeparator);
+                active_items.extend(done_items);
+            }
+
+            active_items
         })
     }
 
@@ -752,6 +773,16 @@ impl ThreadHistory {
                         .color(Color::Muted),
                 )
                 .into_any_element(),
+            ListItemType::DoneSeparator => div()
+                .px(DynamicSpacing::Base06.rems(cx))
+                .pt_2()
+                .pb_1()
+                .child(
+                    Label::new("Done")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
         }
     }
 
@@ -814,6 +845,153 @@ impl ThreadHistory {
             )
             .into_any_element()
     }
+    fn render_status_indicator(&self, entry: &AgentSessionInfo) -> AnyElement {
+        let is_done = entry.workflow_status == Some(WorkflowStatus::Done);
+
+        match entry.status {
+            acp_thread::AgentStatus::Working => h_flex()
+                .w_4()
+                .justify_center()
+                .child(
+                    SpinnerLabel::new()
+                        .size(LabelSize::Default)
+                        .color(Color::Accent),
+                )
+                .into_any_element(),
+            acp_thread::AgentStatus::AwaitingInput => h_flex()
+                .w_4()
+                .justify_center()
+                .child(
+                    SpinnerLabel::new()
+                        .size(LabelSize::Default)
+                        .color(Color::Warning),
+                )
+                .into_any_element(),
+            acp_thread::AgentStatus::Error => Icon::new(IconName::Warning)
+                .color(Color::Error)
+                .size(IconSize::Medium)
+                .into_any_element(),
+            acp_thread::AgentStatus::Idle if is_done => div().w_4().into_any_element(),
+            acp_thread::AgentStatus::Idle => {
+                let color = match entry.workflow_status {
+                    Some(WorkflowStatus::Testing) => Color::Success,
+                    _ => Color::Info,
+                };
+                Icon::new(IconName::SquareDot)
+                    .color(color)
+                    .size(IconSize::Medium)
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn deploy_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self
+            .visible_items
+            .get(ix)
+            .and_then(|item| item.history_entry())
+        else {
+            return;
+        };
+
+        let session_id = entry.session_id.clone();
+        let current_status = entry.workflow_status;
+
+        let context_menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
+            if current_status != Some(WorkflowStatus::NeedsReview) {
+                let session_id = session_id.clone();
+                menu = menu.custom_entry(
+                    move |_window, _cx| Label::new("Mark as Needs Review").into_any_element(),
+                    {
+                        let session_id = session_id.clone();
+                        move |window, cx| {
+                            Self::set_workflow_status_for_session(
+                                &session_id,
+                                Some(WorkflowStatus::NeedsReview),
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                );
+            }
+            if current_status != Some(WorkflowStatus::Testing) {
+                let session_id = session_id.clone();
+                menu = menu.custom_entry(
+                    move |_window, _cx| Label::new("Mark as Testing").into_any_element(),
+                    {
+                        let session_id = session_id.clone();
+                        move |window, cx| {
+                            Self::set_workflow_status_for_session(
+                                &session_id,
+                                Some(WorkflowStatus::Testing),
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                );
+            }
+            if current_status != Some(WorkflowStatus::Done) {
+                let session_id = session_id.clone();
+                menu = menu.custom_entry(
+                    move |_window, _cx| Label::new("Mark as Done").into_any_element(),
+                    {
+                        let session_id = session_id.clone();
+                        move |window, cx| {
+                            Self::set_workflow_status_for_session(
+                                &session_id,
+                                Some(WorkflowStatus::Done),
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                );
+            }
+            menu
+        });
+
+        self.selected_index = ix;
+        let subscription = cx.subscribe_in(
+            &context_menu,
+            window,
+            |this, _, _: &DismissEvent, window, cx| {
+                if this.context_menu.as_ref().is_some_and(|context_menu| {
+                    context_menu.0.focus_handle(cx).contains_focused(window, cx)
+                }) {
+                    cx.focus_self(window);
+                }
+                this.context_menu.take();
+                cx.notify();
+            },
+        );
+        self.context_menu = Some((context_menu, position, subscription));
+        cx.notify();
+    }
+
+    fn set_workflow_status_for_session(
+        session_id: &acp::SessionId,
+        status: Option<WorkflowStatus>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(store) = ThreadStore::try_global(cx) {
+            let session_id = session_id.clone();
+            store.update(cx, move |store, cx| {
+                store
+                    .update_thread_workflow_status(session_id, status, cx)
+                    .detach();
+            });
+        }
+    }
+
     fn render_history_entry(
         &self,
         entry: &AgentSessionInfo,
@@ -825,6 +1003,7 @@ impl ThreadHistory {
         let selected = ix == self.selected_index;
         let active = self.active_session_id.as_ref() == Some(&entry.session_id);
         let hovered = Some(ix) == self.hovered_index;
+        let is_done = entry.workflow_status == Some(WorkflowStatus::Done);
         let entry_time = entry.updated_at;
         let display_text = match (format, entry_time) {
             (EntryTimeFormat::DateAndTime, Some(entry_time)) => {
@@ -847,15 +1026,40 @@ impl ThreadHistory {
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
+        let title_color = if is_done {
+            Color::Muted
+        } else {
+            Color::Default
+        };
+
+        let is_selected = selected || active;
+        let info_color = cx.theme().status().info;
+        let selected_bg_alpha = 0.08;
+        let state_opacity_step = 0.04;
+        let hover_bg = cx.theme().colors().ghost_element_hover;
+
         h_flex()
             .w_full()
-            .pb_1()
+            .h(rems(1.75))
+            .when(is_selected, |this| {
+                this.bg(info_color.alpha(selected_bg_alpha))
+                    .hover(|s| s.bg(info_color.alpha(selected_bg_alpha + state_opacity_step)))
+            })
+            .when(!is_selected, |this| this.hover(|s| s.bg(hover_bg)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if event.button != MouseButton::Right {
+                        return;
+                    }
+                    this.deploy_context_menu(event.position, ix, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(
                 ListItem::new(ix)
-                    .rounded()
-                    .focused(selected)
-                    .toggle_state(active)
-                    .spacing(ListItemSpacing::Sparse)
+                    .selectable(false)
+                    .spacing(ListItemSpacing::Dense)
                     .start_slot(
                         v_flex()
                             .w_full()
@@ -869,43 +1073,7 @@ impl ThreadHistory {
                                             .gap_2()
                                             .flex_shrink()
                                             .overflow_hidden()
-                                            .child(
-                                                Icon::new(match entry.status {
-                                                    acp_thread::AgentStatus::Idle => {
-                                                        IconName::Check
-                                                    }
-                                                    acp_thread::AgentStatus::Working => {
-                                                        IconName::LoadCircle
-                                                    }
-                                                    acp_thread::AgentStatus::AwaitingInput => {
-                                                        IconName::CircleHelp
-                                                    }
-                                                    acp_thread::AgentStatus::Error => {
-                                                        IconName::Warning
-                                                    }
-                                                })
-                                                .color(match entry.status {
-                                                    acp_thread::AgentStatus::Idle => Color::Muted,
-                                                    acp_thread::AgentStatus::Working => {
-                                                        Color::Accent
-                                                    }
-                                                    acp_thread::AgentStatus::AwaitingInput => {
-                                                        Color::Warning
-                                                    }
-                                                    acp_thread::AgentStatus::Error => Color::Error,
-                                                })
-                                                .size(IconSize::Small)
-                                                .map(|icon| {
-                                                    if entry.status
-                                                        == acp_thread::AgentStatus::Working
-                                                    {
-                                                        icon.with_rotate_animation(2)
-                                                            .into_any_element()
-                                                    } else {
-                                                        icon.into_any_element()
-                                                    }
-                                                }),
-                                            )
+                                            .child(self.render_status_indicator(entry))
                                             .child(div().flex_shrink().overflow_hidden().child(
                                                 if self.renaming_session_id.as_ref()
                                                     == Some(&entry.session_id)
@@ -924,7 +1092,7 @@ impl ThreadHistory {
                                                         thread_title(entry),
                                                         highlight_positions.clone(),
                                                     )
-                                                    .size(LabelSize::Small)
+                                                    .color(title_color)
                                                     .truncate()
                                                     .into_any_element()
                                                 },
@@ -1115,7 +1283,9 @@ impl Render for ThreadHistory {
                         list(
                             self.list_state.clone(),
                             cx.processor(|this, ix, _window, cx| {
-                                let item = this.visible_items.get(ix).unwrap();
+                                let Some(item) = this.visible_items.get(ix) else {
+                                    return div().into_any_element();
+                                };
                                 this.render_list_item(item, ix, cx)
                             }),
                         )
@@ -1126,6 +1296,10 @@ impl Render for ThreadHistory {
                     .vertical_scrollbar_for(&self.list_state, window, cx)
                 }
             })
+            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                gpui::deferred(gpui::anchored().position(*position).child(menu.clone()))
+                    .with_priority(1)
+            }))
     }
 }
 
@@ -1508,6 +1682,7 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }
     }
 
@@ -1724,6 +1899,7 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
 
@@ -1765,15 +1941,16 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
 
         let (history, cx) = cx.add_window_view(|window, cx| {
             ThreadHistory::new(Some(session_list.clone()), window, cx)
         });
+
         cx.run_until_parked();
 
-        // Send an update that clears the title (null)
         session_list.send_update(SessionListUpdate::SessionInfo {
             session_id: session_id.clone(),
             update: acp::SessionInfoUpdate::new().title(None::<String>),
@@ -1803,15 +1980,16 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
 
         let (history, cx) = cx.add_window_view(|window, cx| {
             ThreadHistory::new(Some(session_list.clone()), window, cx)
         });
+
         cx.run_until_parked();
 
-        // Send an update with no fields set (all undefined)
         session_list.send_update(SessionListUpdate::SessionInfo {
             session_id: session_id.clone(),
             update: acp::SessionInfoUpdate::new(),
@@ -1844,15 +2022,16 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
 
         let (history, cx) = cx.add_window_view(|window, cx| {
             ThreadHistory::new(Some(session_list.clone()), window, cx)
         });
+
         cx.run_until_parked();
 
-        // Send multiple updates before the executor runs
         session_list.send_update(SessionListUpdate::SessionInfo {
             session_id: session_id.clone(),
             update: acp::SessionInfoUpdate::new().title("First Title"),
@@ -1889,6 +2068,7 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
 
@@ -1931,6 +2111,7 @@ mod tests {
             lines_deleted: 0,
             status: acp_thread::AgentStatus::Idle,
             meta: None,
+            workflow_status: None,
         }];
         let session_list = Rc::new(TestSessionList::new(sessions));
 

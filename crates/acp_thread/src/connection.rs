@@ -222,10 +222,38 @@ pub struct AgentSessionListRequest {
     pub files_changed: i32,
     pub lines_added: i32,
     pub lines_deleted: i32,
-
+    pub workflow_status: Option<WorkflowStatus>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStatus {
+    NeedsReview,
+    Testing,
+    Done,
+}
+
+impl WorkflowStatus {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "needs_review" => Some(WorkflowStatus::NeedsReview),
+            "testing" => Some(WorkflowStatus::Testing),
+            "done" => Some(WorkflowStatus::Done),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkflowStatus::NeedsReview => "needs_review",
+            WorkflowStatus::Testing => "testing",
+            WorkflowStatus::Done => "done",
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     #[default]
     Idle,
@@ -281,7 +309,7 @@ pub struct AgentSessionInfo {
     pub files_changed: i32,
     pub lines_added: i32,
     pub lines_deleted: i32,
-
+    pub workflow_status: Option<WorkflowStatus>,
 }
 
 impl AgentSessionInfo {
@@ -297,6 +325,7 @@ impl AgentSessionInfo {
             files_changed: 0,
             lines_added: 0,
             lines_deleted: 0,
+            workflow_status: None,
         }
     }
 }
@@ -339,6 +368,15 @@ pub trait AgentSessionList {
         _cx: &mut App,
     ) -> Task<Result<()>> {
         Task::ready(Err(anyhow::anyhow!("set_session_title not supported")))
+    }
+
+    fn set_session_workflow_status(
+        &self,
+        _session_id: &acp::SessionId,
+        _status: Option<WorkflowStatus>,
+        _cx: &mut App,
+    ) -> Task<Result<()>> {
+        Task::ready(Err(anyhow::anyhow!("set_session_workflow_status not supported")))
     }
 
     fn supports_delete(&self) -> bool {

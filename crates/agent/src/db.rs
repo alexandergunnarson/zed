@@ -44,6 +44,7 @@ pub struct DbThreadMetadata {
     pub files_changed: i32,
     pub lines_added: i32,
     pub lines_deleted: i32,
+    pub workflow_status: Option<acp_thread::WorkflowStatus>,
 }
 
 impl From<&DbThreadMetadata> for acp_thread::AgentSessionInfo {
@@ -59,6 +60,7 @@ impl From<&DbThreadMetadata> for acp_thread::AgentSessionInfo {
             files_changed: meta.files_changed,
             lines_added: meta.lines_added,
             lines_deleted: meta.lines_deleted,
+            workflow_status: meta.workflow_status,
         }
     }
 }
@@ -440,6 +442,7 @@ impl ThreadsDatabase {
             "ALTER TABLE threads ADD COLUMN files_changed INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE threads ADD COLUMN lines_added INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE threads ADD COLUMN lines_deleted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE threads ADD COLUMN workflow_status TEXT",
         ] {
             if let Ok(mut s) = connection.exec(query) {
                 s().ok();
@@ -509,9 +512,9 @@ impl ThreadsDatabase {
 
         let created_at = Utc::now().to_rfc3339();
 
-        let mut insert = connection.exec_bound::<(Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, DataType, Vec<u8>, String)>(indoc! {"
-            INSERT INTO threads (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, data_type, data, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        let mut insert = connection.exec_bound::<(Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, DataType, Vec<u8>, String, Option<String>)>(indoc! {"
+            INSERT INTO threads (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, data_type, data, created_at, workflow_status)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
                 parent_id = excluded.parent_id,
                 folder_paths = excluded.folder_paths,
@@ -532,6 +535,7 @@ impl ThreadsDatabase {
             data_type,
             data,
             created_at,
+            None, // Assuming workflow_status doesn't change on regular thread saves? Actually, wait, maybe we should preserve it. Yes, we don't update workflow_status in ON CONFLICT
         ))?;
 
         Ok(())
@@ -544,14 +548,14 @@ impl ThreadsDatabase {
             let connection = connection.lock();
 
             let mut select = connection
-                .select_bound::<(), (Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, Option<String>, String, Option<String>, i32, i32, i32)>(indoc! {"
-                SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, status, last_action_summary, files_changed, lines_added, lines_deleted FROM threads ORDER BY updated_at DESC, created_at DESC
+                .select_bound::<(), (Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, Option<String>, String, Option<String>, i32, i32, i32, Option<String>)>(indoc! {"
+                SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, status, last_action_summary, files_changed, lines_added, lines_deleted, workflow_status FROM threads ORDER BY updated_at DESC, created_at DESC
             "})?;
 
             let rows = select(())?;
             let mut threads = Vec::new();
 
-            for (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, status_str, last_action_summary, files_changed, lines_added, lines_deleted) in rows {
+            for (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at, status_str, last_action_summary, files_changed, lines_added, lines_deleted, workflow_status_str) in rows {
                 let folder_paths = folder_paths
                     .map(|paths| {
                         PathList::deserialize(&util::path_list::SerializedPathList {
@@ -578,6 +582,7 @@ impl ThreadsDatabase {
                     files_changed,
                     lines_added,
                     lines_deleted,
+                    workflow_status: workflow_status_str.and_then(|s| acp_thread::WorkflowStatus::from_str(&s)),
                 });
             }
 
@@ -658,6 +663,18 @@ impl ThreadsDatabase {
                 UPDATE threads SET status = ?1 WHERE id = ?2
             "})?;
             update((status.as_str().to_string(), id.0.clone()))?;
+            Ok(())
+        })
+    }
+
+    pub fn update_thread_workflow_status(&self, id: acp::SessionId, status: Option<acp_thread::WorkflowStatus>) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            let mut update = connection.exec_bound::<(Option<String>, Arc<str>)>(indoc! {"
+                UPDATE threads SET workflow_status = ?1 WHERE id = ?2
+            "})?;
+            update((status.map(|s| s.as_str().to_string()), id.0.clone()))?;
             Ok(())
         })
     }

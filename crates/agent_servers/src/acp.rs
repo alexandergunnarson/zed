@@ -131,6 +131,7 @@ impl AgentSessionList for AcpSessionList {
                                 .ok()
                                 .map(|dt| dt.with_timezone(&chrono::Utc))
                         }),
+                        workflow_status: s.meta.as_ref().and_then(|m| m.get("workflow_status")).and_then(|v| v.as_str()).and_then(|s| acp_thread::WorkflowStatus::from_str(s)),
                         meta: s.meta,
                         status: acp_thread::AgentStatus::Idle,
                         last_action_summary: None,

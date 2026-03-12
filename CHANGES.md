@@ -34,6 +34,35 @@ Tracks per-thread status and cumulative diff statistics:
 
 Files: `crates/acp_thread/src/connection.rs`, `crates/agent/src/agent.rs`, `crates/agent/src/thread.rs`, `crates/agent/src/thread_store.rs`, `crates/agent/src/db.rs`, `crates/agent_servers/src/acp.rs`, `crates/sqlez/src/bindable.rs`, `crates/sidebar/src/sidebar.rs`
 
+## Feature: Thread workflow status triage
+
+Adds a user-driven workflow status system for triaging agent threads, with visual indicators matching the git panel's design language:
+
+- **Workflow statuses**: `NeedsReview`, `Testing`, `Done` — persisted to SQLite via the existing `workflow_status` column.
+- **Auto-transition**: When an agent completes a turn (Working → Idle), the thread is automatically marked `NeedsReview`.
+- **Status indicators**: `SquareDot` icon (matching git panel's modified icon) in `Color::Info` for Needs Review, `Color::Success` for Testing. Working threads show animated braille dots (`SpinnerLabel`). Awaiting Input shows braille dots in `Color::Warning`.
+- **Done section**: Threads marked Done are separated into their own "Done" section at the bottom of the thread list, below all time buckets, with no icon and muted title text.
+- **Right-click context menu**: Set workflow status via "Mark as Needs Review" / "Mark as Testing" / "Mark as Done" on any thread entry.
+- **Visual refresh**: Thread list rows now match git panel styling — `LabelSize::Default` font, `rems(1.75)` row height, `info_color` selection background at 8% opacity, `Dense` spacing.
+
+Files: `crates/acp_thread/src/connection.rs`, `crates/agent/src/agent.rs`, `crates/agent/src/db.rs`, `crates/agent/src/thread_store.rs`, `crates/agent_servers/src/acp.rs`, `crates/agent_ui/src/thread_history.rs`, `crates/sidebar/src/sidebar.rs`
+
+## Feature: Regenerate without reverting edits
+
+When regenerating a prompt that produced file edits, the user is now prompted whether to keep or discard those edits instead of always reverting them. The `rewind()` method gains a `revert_edits` parameter to control this behavior.
+
+- **`rewind(id, revert_edits, cx)`** — when `revert_edits` is false, file changes from the rewound entries are left intact for the user to review/accept/reject independently.
+- **Prompt on regenerate** — if the entries being regenerated contain diffs, a confirmation dialog asks whether to keep or discard the edits before proceeding.
+- **Later-edit detection** — correctly identifies edits *after* the regeneration point (not before) to determine whether the prompt is needed.
+
+Files: `crates/acp_thread/src/acp_thread.rs`, `crates/agent_ui/src/connection_view.rs`, `crates/agent_ui/src/connection_view/thread_view.rs`
+
+## Bugfix: Git checkpoint failure no longer blocks all repositories
+
+`GitStore::checkpoint()` previously used `try_join_all`, so a single repository failing to checkpoint would cause the entire operation to fail. Now uses `join_all` with per-repository error logging, skipping failed repos instead of aborting.
+
+Files: `crates/project/src/git_store.rs`
+
 ## Feature: `terminal::SendToTerminal` action
 
 Workspace-level action that sends text to the active terminal with `$ZED_*` task variable substitution. Analogous to VSCode's `workbench.action.terminal.sendSequence`.
