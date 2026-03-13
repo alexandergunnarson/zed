@@ -3,7 +3,7 @@ use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCo
 use editor::actions::OpenExcerpts;
 
 use crate::StartThreadIn;
-use gpui::{Corner, List};
+use gpui::{Corner, List, PromptButton, PromptLevel};
 use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;
 use ui::{ButtonLike, SplitButton, SplitButtonStyle, Tab};
@@ -305,7 +305,11 @@ impl ThreadView {
         }
     }
 
-    fn is_tool_call_open(&self, id: &agent_client_protocol::ToolCallId, is_completed: bool) -> bool {
+    fn is_tool_call_open(
+        &self,
+        id: &agent_client_protocol::ToolCallId,
+        is_completed: bool,
+    ) -> bool {
         if is_completed {
             self.expanded_tool_calls.contains(id)
         } else {
@@ -674,12 +678,8 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         match &event.view_event {
-            ViewEvent::NewDiff(_) => {
-                
-            }
-            ViewEvent::NewTerminal(_) => {
-                
-            }
+            ViewEvent::NewDiff(_) => {}
+            ViewEvent::NewTerminal(_) => {}
             ViewEvent::TerminalMovedToBackground(tool_call_id) => {
                 self.expanded_tool_calls.remove(tool_call_id);
             }
@@ -1247,31 +1247,84 @@ impl ThreadView {
         };
 
         cx.spawn_in(window, async move |this, cx| {
-            // Check if there are any edits from prompts before the one being regenerated.
-            //
-            // If there are, we keep/accept them since we're not regenerating the prompt that created them.
-            //
-            // If editing the prompt that generated the edits, they are auto-rejected
-            // through the `rewind` function in the `acp_thread`.
-            let has_earlier_edits = thread.read_with(cx, |thread, _| {
+            let has_later_edits = thread.read_with(cx, |thread, _| {
                 thread
                     .entries()
                     .iter()
-                    .take(entry_ix)
+                    .skip(entry_ix)
                     .any(|entry| entry.diffs().next().is_some())
             });
 
-            if has_earlier_edits {
-                thread.update(cx, |thread, cx| {
-                    thread.action_log().update(cx, |action_log, cx| {
-                        action_log.keep_all_edits(None, cx);
-                    });
+            let revert_edits = if has_later_edits {
+                let answer = cx.prompt(
+                    PromptLevel::Warning,
+                    "Submit from a previous message?",
+                    Some(
+                        "Submitting from a previous message will clear the messages \
+                         after this one. File changes can be reverted or kept as-is.",
+                    ),
+                    &[
+                        PromptButton::ok("Keep"),
+                        PromptButton::new("Revert"),
+                        PromptButton::cancel("Cancel"),
+                    ],
+                );
+                match answer.await {
+                    Ok(0) => false,
+                    Ok(1) => true,
+                    _ => return anyhow::Ok(()),
+                }
+            } else {
+                false
+            };
+
+            // When reverting, collect per-buffer base_text from diffs in the
+            // entries about to be truncated. The earliest base_text per buffer
+            // captures the state just before the first truncated edit,
+            // preserving earlier agent edits in the file content.
+            let buffers_to_restore = if revert_edits {
+                thread.read_with(cx, |thread, cx| {
+                    let mut restore_map = HashMap::default();
+                    for entry in thread.entries().iter().skip(entry_ix) {
+                        for diff_entity in entry.diffs() {
+                            let diff = diff_entity.read(cx);
+                            let buffer = diff.buffer().clone();
+                            let base_text = diff.base_text().clone();
+                            restore_map.entry(buffer).or_insert(base_text);
+                        }
+                    }
+                    restore_map
+                })
+            } else {
+                HashMap::default()
+            };
+
+            // Always rewind without rejecting edits — we handle revert
+            // ourselves using the per-diff base_text collected above.
+            thread
+                .update(cx, |thread, cx| thread.rewind(user_message_id, false, cx))
+                .await?;
+
+            // Restore each affected buffer to its pre-truncated-edit state
+            // and save to disk.
+            if !buffers_to_restore.is_empty() {
+                let save_tasks = thread.update(cx, |thread, cx| {
+                    let project = thread.project().clone();
+                    buffers_to_restore
+                        .into_iter()
+                        .map(|(buffer, base_text)| {
+                            buffer.update(cx, |buffer, cx| {
+                                buffer.set_text(base_text.as_ref(), cx);
+                            });
+                            project.update(cx, |project, cx| project.save_buffer(buffer, cx))
+                        })
+                        .collect::<Vec<_>>()
                 });
+                for task in save_tasks {
+                    task.await.log_err();
+                }
             }
 
-            thread
-                .update(cx, |thread, cx| thread.rewind(user_message_id, cx))
-                .await?;
             this.update_in(cx, |thread, window, cx| {
                 thread.send_impl(message_editor, window, cx);
                 thread.focus_handle(cx).focus(window, cx);
@@ -6455,7 +6508,8 @@ impl ThreadView {
                         .icon_color(Color::Muted)
                         .on_click(cx.listener({
                             move |this: &mut Self, _, _, cx: &mut Context<Self>| {
-                                this.expanded_tool_calls.remove(&tool_call_id); this.collapsed_tool_calls.insert(tool_call_id.clone());
+                                this.expanded_tool_calls.remove(&tool_call_id);
+                                this.collapsed_tool_calls.insert(tool_call_id.clone());
                                 cx.notify();
                             }
                         })),
@@ -6781,7 +6835,8 @@ impl ThreadView {
                                         let tool_call_id = tool_call.id.clone();
                                         move |this, _, _, cx| {
                                             this.toggle_tool_call(&tool_call_id, is_completed);
-                                            let expanded = this.is_tool_call_open(&tool_call_id, is_completed);
+                                            let expanded =
+                                                this.is_tool_call_open(&tool_call_id, is_completed);
                                             telemetry::event!("Subagent Toggled", expanded);
                                             cx.notify();
                                         }

@@ -4529,7 +4529,9 @@ pub(crate) mod tests {
 
         // Rewind to first message
         thread
-            .update(cx, |thread, cx| thread.rewind(second_user_message_id, cx))
+            .update(cx, |thread, cx| {
+                thread.rewind(second_user_message_id, true, cx)
+            })
             .await
             .unwrap();
 
