@@ -1074,17 +1074,32 @@ impl GitStore {
         for repository in self.repositories.values() {
             repository.update(cx, |repository, _| {
                 work_directory_abs_paths.push(repository.snapshot.work_directory_abs_path.clone());
-                checkpoints.push(repository.checkpoint().map(|checkpoint| checkpoint?));
+                checkpoints.push(repository.checkpoint());
             });
         }
 
         cx.background_executor().spawn(async move {
-            let checkpoints = future::try_join_all(checkpoints).await?;
+            let results = future::join_all(checkpoints).await;
+            let checkpoints_by_work_dir_abs_path = work_directory_abs_paths
+                .into_iter()
+                .zip(results)
+                .filter_map(|(path, result)| match result {
+                    Ok(Ok(checkpoint)) => Some((path, checkpoint)),
+                    Ok(Err(error)) => {
+                        log::warn!(
+                            "Failed to checkpoint repository at {}: {error:#}",
+                            path.display()
+                        );
+                        None
+                    }
+                    Err(_canceled) => {
+                        log::warn!("Checkpoint canceled for repository at {}", path.display());
+                        None
+                    }
+                })
+                .collect();
             Ok(GitStoreCheckpoint {
-                checkpoints_by_work_dir_abs_path: work_directory_abs_paths
-                    .into_iter()
-                    .zip(checkpoints)
-                    .collect(),
+                checkpoints_by_work_dir_abs_path,
             })
         })
     }
