@@ -16,5 +16,8 @@ rustflags = [
     "target-feature=+crt-static", # This fixes the linking issue when compiling livekit on Windows
 ]
 
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"
