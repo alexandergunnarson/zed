@@ -354,6 +354,12 @@ impl AgentTool for StreamingEditFileTool {
                         }
                     }
                     _ = event_stream.cancelled_by_user().fuse() => {
+                        // Save any edits already applied to the buffer so they aren't lost.
+                        if let Some(state) = &state {
+                            self.project.update(cx, |project, cx| {
+                                project.save_buffer(state.buffer.clone(), cx)
+                            }).await.log_err();
+                        }
                         return Err(StreamingEditFileToolOutput::error("Edit cancelled by user"));
                     }
                 }
@@ -612,20 +618,18 @@ impl EditSession {
             futures::select! {
                 result = format_task.fuse() => { result.log_err(); },
                 _ = event_stream.cancelled_by_user().fuse() => {
-                    return Err(StreamingEditFileToolOutput::error("Edit cancelled by user"));
+                    // Formatting was cancelled; proceed to save without formatting
+                    // so that edits already applied to the buffer are not lost.
                 }
             };
         }
 
-        let save_task = tool.project.update(cx, |project, cx| {
-            project.save_buffer(self.buffer.clone(), cx)
-        });
-        futures::select! {
-            result = save_task.fuse() => { result.map_err(|e| StreamingEditFileToolOutput::error(e.to_string()))?; },
-            _ = event_stream.cancelled_by_user().fuse() => {
-                return Err(StreamingEditFileToolOutput::error("Edit cancelled by user"));
-            }
-        };
+        tool.project
+            .update(cx, |project, cx| {
+                project.save_buffer(self.buffer.clone(), cx)
+            })
+            .await
+            .map_err(|e| StreamingEditFileToolOutput::error(e.to_string()))?;
 
         tool.action_log.update(cx, |log, cx| {
             log.buffer_edited(self.buffer.clone(), cx);

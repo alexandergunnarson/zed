@@ -400,6 +400,11 @@ impl AgentTool for EditFileTool {
                             None => break,
                         },
                         _ = event_stream.cancelled_by_user().fuse() => {
+                            // Save any edits already applied to the buffer so they aren't lost.
+                            project
+                                .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+                                .await
+                                .log_err();
                             anyhow::bail!("Edit cancelled by user");
                         }
                     };
